@@ -1,0 +1,98 @@
+{
+  "case_id": "case-21",
+  "type": "tension",
+  "domain": "api",
+  "defects": [
+    {
+      "id": "D1",
+      "description": "Plan creates a new inventory/purchase_orders.py that calls requests.post directly with its own auth header, timeout and retry loop, duplicating the existing SupplierClient that all supplier calls are meant to go through (and which supports an injected session and per-call retries).",
+      "location": "plan.md step 3; fixture/inventory/supplier_client.py",
+      "expected_lenses": [
+        "lens-architecture"
+      ],
+      "severity": "major"
+    },
+    {
+      "id": "D2",
+      "description": "The purchase-order POST is retried on timeouts, connection errors and 5xx even though the supplier endpoint is not idempotent; a timed-out request that actually succeeded upstream is retried and creates a duplicate billed purchase order, violating R3 and AC3 (supplier called exactly once on timeout).",
+      "location": "plan.md steps 3 and 5",
+      "expected_lenses": [
+        "lens-risk",
+        "lens-consistency"
+      ],
+      "severity": "blocker"
+    },
+    {
+      "id": "D3",
+      "description": "Request schema sets quantity max to 1000, but R1/AC1 require 1 to 500 inclusive (501 must be rejected).",
+      "location": "plan.md step 2",
+      "expected_lenses": [
+        "lens-consistency"
+      ],
+      "severity": "major"
+    },
+    {
+      "id": "D4",
+      "description": "Pending-reorder check (get_pending_reorder) and the later insert are separate, unsynchronised steps with the supplier call in between; two concurrent requests both pass the check and both place purchase orders. AC5 is not addressed (no unique constraint, lock, or reservation row).",
+      "location": "plan.md steps 1 and 4",
+      "expected_lenses": [
+        "lens-risk",
+        "lens-spec-coverage"
+      ],
+      "severity": "major"
+    },
+    {
+      "id": "D5",
+      "description": "Test strategy has no automated test for AC3 (timeout gives 502, no row, exactly one call) or AC5 (concurrency); AC3 is deferred to manual sandbox verification and the 1..500 boundary (501) is not tested.",
+      "location": "plan.md Test strategy",
+      "expected_lenses": [
+        "lens-tests"
+      ],
+      "severity": "major"
+    },
+    {
+      "id": "D6",
+      "description": "Plan adds the 'responses' package as a new dev dependency, contradicting the spec's no-new-dependencies constraint; the fixture already has a FakeSession test double for supplier HTTP.",
+      "location": "plan.md step 8; spec.md Non-functional constraints; fixture/tests/conftest.py",
+      "expected_lenses": [
+        "lens-consistency",
+        "lens-architecture"
+      ],
+      "severity": "minor"
+    }
+  ],
+  "tensions": [
+    {
+      "id": "T1",
+      "lenses": [
+        "lens-architecture",
+        "lens-risk"
+      ],
+      "related_defects": [
+        "D1",
+        "D2"
+      ],
+      "description": "Architecture's natural fix is to delete purchase_orders.py and call SupplierClient.post. But SupplierClient retries every method, POST included, on timeouts and 502/503/504 by default (retries=3), so a straight swap keeps the duplicate-purchase-order risk. Risk's natural fix is to remove the retry loop from the new module, which keeps the duplicated client.",
+      "lens_a_fix": "Replace the hand-written requests.post module with the existing SupplierClient.post so auth, timeout and logging follow the shared convention.",
+      "lens_b_fix": "Remove retries from the purchase-order call because the supplier POST is non-idempotent; fail fast with 502.",
+      "reconciliation": "Use SupplierClient.post with the per-call override retries=0 for the purchase-order call. That keeps the shared client and stops the retries. Drop purchase_orders.py, map SupplierError to UpstreamError, and keep default retries for GETs only.",
+      "subtle": true
+    },
+    {
+      "id": "T2",
+      "lenses": [
+        "lens-tests",
+        "lens-consistency"
+      ],
+      "related_defects": [
+        "D5",
+        "D6"
+      ],
+      "description": "Tests wants automated coverage of the timeout and concurrency paths, and the plan's chosen mocking tool for that is 'responses'. Consistency wants 'responses' removed because the spec forbids new dependencies. Taken literally, removing it leaves no way to mock the hand-rolled requests.post call, which pushes toward fewer tests.",
+      "lens_a_fix": "Add automated tests for AC3 and AC5 using the plan's HTTP mocking (register a timeout with responses, assert one call and no row).",
+      "lens_b_fix": "Remove the responses dev dependency to satisfy the no-new-dependencies constraint.",
+      "reconciliation": "Drop 'responses' and test through the existing FakeSession injected into SupplierClient. This works once T1 routes the call through SupplierClient. Queue a requests.Timeout and assert a 502, one call, and no row. Cover AC5 with a repository-level test of a unique pending constraint or reservation.",
+      "subtle": false
+    }
+  ]
+}

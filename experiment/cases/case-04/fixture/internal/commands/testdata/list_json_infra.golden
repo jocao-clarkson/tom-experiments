@@ -1,0 +1,19 @@
+[
+  {
+    "id": "p-001",
+    "name": "edge-proxy",
+    "owner": "platform",
+    "tags": [
+      "infra",
+      "network"
+    ]
+  },
+  {
+    "id": "p-002",
+    "name": "build-cache",
+    "owner": "platform",
+    "tags": [
+      "infra"
+    ]
+  }
+]

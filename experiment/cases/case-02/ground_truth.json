@@ -1,0 +1,95 @@
+{
+  "case_id": "case-02",
+  "type": "tension",
+  "domain": "data-pipeline",
+  "defects": [
+    {
+      "id": "D1",
+      "description": "Plan builds a separate purchases package (loop.go, writer.go) that duplicates the generic pipeline.Runner (poll, transform, write, DLQ, commit, metrics) and bypasses the sink.Warehouse interface. Purchases need only a new TransformFunc and a Runner instance.",
+      "location": "plan.md overview, steps 3-4, 9; fixture/internal/pipeline/runner.go; fixture/internal/sink/warehouse.go",
+      "expected_lenses": ["lens-architecture"],
+      "severity": "major"
+    },
+    {
+      "id": "D2",
+      "description": "The new writer uses a plain multi-row INSERT with no conflict handling or revision guard. A redelivered batch either duplicates rows or, given the unique key on event_id, fails, and corrected revisions are never applied. This breaks R6, AC1 and AC2.",
+      "location": "plan.md step 3; spec.md R6, AC1, AC2",
+      "expected_lenses": ["lens-risk", "lens-consistency"],
+      "severity": "blocker"
+    },
+    {
+      "id": "D3",
+      "description": "Write failures are retried forever with a fixed 2s sleep that ignores ctx. This goes against the bounded retry policy, ignores the existing retry.Do helper and WriteAttempts config, and on a permanent error such as a unique-key violation it stalls the stream silently while lag grows.",
+      "location": "plan.md step 7; fixture/internal/retry/retry.go; spec.md non-functional constraints",
+      "expected_lenses": ["lens-risk"],
+      "severity": "major"
+    },
+    {
+      "id": "D4",
+      "description": "Step 5 commits offsets right after poll and transform, before the write. That contradicts step 7 ('offsets are not committed until the write succeeds') and R5/AC4, and loses data if the write then fails or the process crashes.",
+      "location": "plan.md steps 5 and 7; spec.md R5, AC4",
+      "expected_lenses": ["lens-consistency"],
+      "severity": "blocker"
+    },
+    {
+      "id": "D5",
+      "description": "AC1/AC2 (replay idempotency, highest revision wins) are 'tested' only by a fake writer that records calls. That cannot show the table ends up with one row at the highest revision, so the main correctness property is untested.",
+      "location": "plan.md test strategy",
+      "expected_lenses": ["lens-tests"],
+      "severity": "major"
+    },
+    {
+      "id": "D6",
+      "description": "Step 10 adds a CI job with a Postgres service container, which changes CI configuration/infrastructure. The spec explicitly puts this out of scope (owned by DevEx).",
+      "location": "plan.md step 10; spec.md non-functional constraints and out of scope",
+      "expected_lenses": ["lens-spec-coverage"],
+      "severity": "major"
+    },
+    {
+      "id": "D7",
+      "description": "Only rows_ingested is emitted; R7 also requires rows_dead_lettered.",
+      "location": "plan.md step 8; spec.md R7",
+      "expected_lenses": ["lens-spec-coverage"],
+      "severity": "minor"
+    },
+    {
+      "id": "D8",
+      "description": "Amounts are parsed with strconv.ParseFloat and multiplied by 100, which can mis-round decimal money values. Strings should be parsed as decimals or as integer parts.",
+      "location": "plan.md step 2",
+      "expected_lenses": ["lens-risk"],
+      "severity": "minor"
+    }
+  ],
+  "tensions": [
+    {
+      "id": "T1",
+      "lenses": ["lens-architecture", "lens-risk"],
+      "related_defects": ["D1", "D2"],
+      "description": "Architecture's natural fix is to drop the custom writer and use sink.Warehouse.WriteBatch through the existing Runner. But WriteBatch uses ON CONFLICT (event_id) DO NOTHING, which silently drops corrected higher revisions, so R6/AC2 still fail. Risk's natural fix is a revision-aware upsert, which WriteBatch cannot express. The conflict only shows up after reading the fixture's SQL.",
+      "lens_a_fix": "Delete internal/purchases/writer.go and loop.go and run purchases through pipeline.Runner with sink.Warehouse.WriteBatch.",
+      "lens_b_fix": "Write purchases with INSERT ... ON CONFLICT (event_id) DO UPDATE ... WHERE purchases.revision < EXCLUDED.revision.",
+      "reconciliation": "Reuse pipeline.Runner and the sink package, but extend sink with a revision-aware upsert (for example an UpsertBatch with a version column, or a per-table conflict policy) rather than adding a parallel writer. Clicks keep DO NOTHING; purchases get the guarded DO UPDATE.",
+      "subtle": true
+    },
+    {
+      "id": "T2",
+      "lenses": ["lens-risk", "lens-consistency"],
+      "related_defects": ["D3", "D4"],
+      "description": "Risk's natural fix for the infinite retry is to bound attempts and, once they are exhausted, dead-letter or skip the batch and keep going so lag stays bounded. Consistency insists that offsets are committed only after a durable write (R5, AC4) and that only the three invalid-record reasons go to the DLQ (R3). Skipping or dead-lettering valid rows after bounded retries breaks both.",
+      "lens_a_fix": "Use retry.Do with WriteAttempts; if it still fails, move the batch to purchases_dlq, commit, and continue.",
+      "lens_b_fix": "Never commit offsets before a successful write, and never send valid events to the DLQ.",
+      "reconciliation": "Bound retries with retry.Do and the configured WriteAttempts. On exhaustion, return an error from the runner without committing, as the existing Runner does, so the process restarts from the last committed offset, and alert on it. Commit only after the write succeeds and keep the DLQ for R3 reasons only.",
+      "subtle": false
+    },
+    {
+      "id": "T3",
+      "lenses": ["lens-tests", "lens-spec-coverage"],
+      "related_defects": ["D5", "D6"],
+      "description": "Tests wants AC1/AC2 checked against real database semantics (conflict and revision handling), which in the plan relies on the new Postgres CI job. Coverage flags that CI job as an out-of-scope change. Removing it, as coverage would, leaves the main correctness property untested, which is what tests is objecting to.",
+      "lens_a_fix": "Add an integration test against a real Postgres that replays batches and delivers revisions out of order.",
+      "lens_b_fix": "Remove the CI workflow change from the plan.",
+      "reconciliation": "Drop the CI change. Unit-test the generated upsert SQL and the revision rule in the sink package with a statement-recording fake, keep the integration test behind a build tag runnable locally, and add a staging verification step (replay plus out-of-order revision) to rollout. If real-DB CI coverage is wanted, raise it with DevEx.",
+      "subtle": false
+    }
+  ]
+}

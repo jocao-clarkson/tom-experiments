@@ -1,0 +1,117 @@
+{
+  "case_id": "case-30",
+  "type": "tension",
+  "domain": "mobile-backend",
+  "defects": [
+    {
+      "id": "D1",
+      "description": "The complete endpoint loads the attachment by id with no ownership check, so any authenticated user can complete another user's attachment (and trigger jobs on it). That violates R2's owner-only rule and AC2.",
+      "location": "plan.md step 5",
+      "expected_lenses": [
+        "lens-risk",
+        "lens-spec-coverage"
+      ],
+      "severity": "blocker"
+    },
+    {
+      "id": "D2",
+      "description": "The handler builds its own boto3 client and issues a presigned PUT URL without content-type or size conditions, bypassing Storage.presign_upload. The fixture method already creates presigned POST policies with content-length-range and Content-Type, which R1 requires ('enforces the declared type and size at the storage layer').",
+      "location": "plan.md step 4; fixture/app/storage.py",
+      "expected_lenses": [
+        "lens-architecture",
+        "lens-risk"
+      ],
+      "severity": "major"
+    },
+    {
+      "id": "D3",
+      "description": "The limit counts only ready attachments, but R3/AC4 require counting uploads in progress. Many concurrent pending uploads can exceed 20.",
+      "location": "plan.md steps 2-3; spec.md R3, AC4",
+      "expected_lenses": [
+        "lens-consistency"
+      ],
+      "severity": "major"
+    },
+    {
+      "id": "D4",
+      "description": "Pending attachment rows never lapse. Mobile uploads are often abandoned when the app is killed or loses network, and nothing marks those rows dead. AC6 (the user can add attachments later once an abandoned upload has lapsed) is not addressed, and limits or counts over pending rows grow stale.",
+      "location": "plan.md steps 1-3; spec.md AC6",
+      "expected_lenses": [
+        "lens-risk"
+      ],
+      "severity": "major"
+    },
+    {
+      "id": "D5",
+      "description": "Complete decodes and resizes the image with Pillow inline, which violates the NFR (no image processing in the request path, p95 under 300 ms) and adds a new dependency (step 8). Complete also checks the client-reported size_bytes against the stored value instead of the size and type that head() returns from storage, as R2 requires.",
+      "location": "plan.md steps 5, 6, 8; fixture/app/storage.py",
+      "expected_lenses": [
+        "lens-consistency",
+        "lens-risk"
+      ],
+      "severity": "major"
+    },
+    {
+      "id": "D6",
+      "description": "R5/AC5 (clients older than 4.0 must not receive the attachments key) is not implemented. The plan never registers attachments in compat.GATED_KEYS or otherwise gates by version.",
+      "location": "plan.md step 7; fixture/app/compat.py",
+      "expected_lenses": [
+        "lens-spec-coverage"
+      ],
+      "severity": "blocker"
+    },
+    {
+      "id": "D7",
+      "description": "Attachments, with fresh presigned URLs and a DB query per note, are added to the shared note_to_dict. That function is also used by push.shared_note_payload, so silent push payloads grow toward the 4 KB APNs limit (the fallback strips the note body) and every serialization does storage and DB work. It breaks the 'serializers stay version-agnostic and pure' convention.",
+      "location": "plan.md step 7; fixture/app/serializers.py; fixture/app/push.py",
+      "expected_lenses": [
+        "lens-architecture",
+        "lens-risk"
+      ],
+      "severity": "major"
+    },
+    {
+      "id": "D8",
+      "description": "Tests miss AC2 (another user's attachment), AC4 with pending attachments, AC5 (old versus new client on both endpoints), AC6, and attachments on /sync. The limit test uses only ready attachments.",
+      "location": "plan.md Test strategy",
+      "expected_lenses": [
+        "lens-tests"
+      ],
+      "severity": "major"
+    }
+  ],
+  "tensions": [
+    {
+      "id": "T1",
+      "lenses": [
+        "lens-consistency",
+        "lens-risk"
+      ],
+      "related_defects": [
+        "D3",
+        "D4"
+      ],
+      "description": "Consistency's natural fix is to count pending plus ready attachments, as R3 says. Risk sees that pending rows never lapse, so with that fix a note with 20 abandoned uploads is blocked forever, which also fails AC6. Risk's natural fix, a cleanup job that expires stale pending rows, is explicitly out of scope ('this project adds no background jobs'). The fixes conflict on how 'in progress' is defined.",
+      "lens_a_fix": "Count pending and ready attachments toward the 20 limit.",
+      "lens_b_fix": "Add a periodic cleanup that marks or deletes pending attachments whose upload never completed.",
+      "reconciliation": "Treat an upload as in progress only while its presigned policy is still valid. Count ready attachments plus pending ones created within the last 15 minutes (upload_expiry_s), and let complete reject pending attachments older than that. R3 and AC6 then hold with no background job, and the bucket lifecycle rule removes the orphaned objects.",
+      "subtle": true
+    },
+    {
+      "id": "T2",
+      "lenses": [
+        "lens-spec-coverage",
+        "lens-architecture"
+      ],
+      "related_defects": [
+        "D6",
+        "D7"
+      ],
+      "description": "Architecture's natural fix is to take attachments out of the shared note_to_dict (which also feeds push payloads) and add them only in the GET /notes/{id} route. Coverage needs attachments on both GET /notes/{id} and GET /sync (R4), plus version gating (R5). Moving them into one route drops /sync coverage, while leaving them in the serializer keeps the push-payload and purity problems.",
+      "lens_a_fix": "Do not modify note_to_dict; add attachments in the route handler for GET /notes/{id}.",
+      "lens_b_fix": "Ensure both GET /notes/{id} and GET /sync include attachments, and that clients below 4.0 never receive the key.",
+      "reconciliation": "Leave note_to_dict and push untouched. Add a route-level helper that attaches attachments (batch-loaded per sync page) in both GET /notes/{id} and GET /sync. Register 'attachments': (4, 0) in compat.GATED_KEYS so the existing shape_for_client call drops it for older clients on both endpoints. Test both endpoints at 3.9 and 4.0.",
+      "subtle": false
+    }
+  ]
+}

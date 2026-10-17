@@ -1,0 +1,17 @@
+{
+  "name": "deployctl",
+  "version": "1.6.2",
+  "description": "Command-line client for the internal deploy service",
+  "type": "module",
+  "bin": { "deployctl": "dist/cli.js" },
+  "scripts": {
+    "build": "tsc -p .",
+    "test": "node --import tsx --test test/*.test.ts"
+  },
+  "engines": { "node": ">=20" },
+  "devDependencies": {
+    "@types/node": "^20.12.7",
+    "tsx": "^4.9.3",
+    "typescript": "^5.4.5"
+  }
+}

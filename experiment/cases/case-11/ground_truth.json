@@ -1,0 +1,71 @@
+{
+  "case_id": "case-11",
+  "type": "tension",
+  "domain": "api",
+  "defects": [
+    {
+      "id": "D1",
+      "description": "Plan creates a new PayCoreClient wrapping httpx.AsyncClient directly instead of reusing the shared app/clients/http.py HttpClient that every other outbound call uses (timeout, structured logging, UpstreamError mapping).",
+      "location": "plan.md step 2; fixture/app/clients/http.py",
+      "expected_lenses": ["lens-architecture"],
+      "severity": "major"
+    },
+    {
+      "id": "D2",
+      "description": "Plan retries the PayCore refund call once on timeout. Spec R3/AC3 require exactly one outbound call because PayCore refunds are not idempotent; a timeout must go straight to pending_review. The retry can create a duplicate refund.",
+      "location": "plan.md step 5; spec.md R3, AC3",
+      "expected_lenses": ["lens-consistency", "lens-risk"],
+      "severity": "blocker"
+    },
+    {
+      "id": "D3",
+      "description": "PayCore client is configured with timeout=None, so outbound calls have no timeout. Violates the NFR that outbound calls must have a timeout and makes the R3 timeout path unreachable; can exhaust workers/DB pool.",
+      "location": "plan.md step 2; spec.md non-functional constraints",
+      "expected_lenses": ["lens-risk"],
+      "severity": "major"
+    },
+    {
+      "id": "D4",
+      "description": "RefundDeclinedError uses a fixed message and no details.reason, so R5/AC4 (human-readable decline reason) is not implemented.",
+      "location": "plan.md step 3; spec.md R5, AC4",
+      "expected_lenses": ["lens-spec-coverage"],
+      "severity": "major"
+    },
+    {
+      "id": "D5",
+      "description": "Plan logs the full PayCore response body via a plain logging.getLogger call, bypassing app/logging.py log_event redaction. Decline payloads contain billing address, card last4 and fingerprint, which the NFR forbids in logs.",
+      "location": "plan.md step 6; fixture/app/logging.py; spec.md non-functional constraints",
+      "expected_lenses": ["lens-risk", "lens-architecture"],
+      "severity": "major"
+    },
+    {
+      "id": "D6",
+      "description": "Successful refund returns 200 but spec R6/AC1 require 201.",
+      "location": "plan.md step 7; spec.md R6",
+      "expected_lenses": ["lens-consistency"],
+      "severity": "minor"
+    }
+  ],
+  "tensions": [
+    {
+      "id": "T1",
+      "lenses": ["lens-architecture", "lens-consistency"],
+      "related_defects": ["D1", "D2"],
+      "description": "Architecture's natural fix is to drop the bespoke client and use the shared HttpClient. But HttpClient retries every method, including POST, on timeouts and 502/503/504 with max_retries=3 by default. Reusing it as-is reintroduces (and worsens) the retry that consistency wants removed to honour the exactly-once rule in R3. The conflict is only visible in the fixture's retry loop.",
+      "lens_a_fix": "Replace PayCoreClient with an instance of the shared HttpClient for PayCore calls.",
+      "lens_b_fix": "Remove all retries on the refund call so it is issued exactly once; a timeout goes straight to pending_review.",
+      "reconciliation": "Reuse HttpClient but construct the PayCore instance with max_retries=0 (the constructor already supports it) and a finite timeout, so the call is made once and a timeout surfaces as UpstreamError, which the service maps to pending_review/202. Do not change the shared retry defaults.",
+      "subtle": true
+    },
+    {
+      "id": "T2",
+      "lenses": ["lens-spec-coverage", "lens-risk"],
+      "related_defects": ["D4", "D5"],
+      "description": "Spec-coverage wants R5's decline reason returned to the agent; the obvious way is to pass PayCore's decline message/payload through. Risk notes the decline payload contains billing address, card last4 and fingerprint that must not leave the service or reach logs, and wants raw provider payloads kept out of both responses and logs.",
+      "lens_a_fix": "Include PayCore's decline message in error.details.reason on the 502 response.",
+      "lens_b_fix": "Never surface or log the raw PayCore payload; log only through the redacting log_event helper and keep responses generic.",
+      "reconciliation": "Map PayCore decline codes to a fixed allow-list of human-readable reasons (with a generic fallback) for details.reason, never echoing raw provider text, and log the decline via log_event so redaction applies.",
+      "subtle": false
+    }
+  ]
+}

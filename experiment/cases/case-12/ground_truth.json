@@ -1,0 +1,71 @@
+{
+  "case_id": "case-12",
+  "type": "tension",
+  "domain": "data-pipeline",
+  "defects": [
+    {
+      "id": "D1",
+      "description": "Backfill is a separate script that re-implements the extract/transform/load loop instead of reusing runner.process_partition, duplicating the partition pipeline (and the summary logic) outside the runner module.",
+      "location": "plan.md step 6; fixture/pipeline/runner.py",
+      "expected_lenses": ["lens-architecture"],
+      "severity": "major"
+    },
+    {
+      "id": "D2",
+      "description": "Plan claims concurrent backfill and nightly writes to the same partition are harmless. Warehouse.replace_partition does DELETE then INSERT with executemany before a single commit; two writers interleaving on the same partition (the backfill's newest partition overlaps the nightly one, and the backfill is expected to overlap a nightly window) can duplicate rows, violating R4/AC3. No coordination is planned.",
+      "location": "plan.md step 6 and rollout notes; fixture/pipeline/load.py",
+      "expected_lenses": ["lens-risk"],
+      "severity": "major"
+    },
+    {
+      "id": "D3",
+      "description": "Plan falls back to a previous day's rate (up to 3 days back) when the event-date rate is missing. Spec R2 says events with no rate for the date must not be loaded with a guessed value and must be quarantined.",
+      "location": "plan.md step 3; spec.md R2",
+      "expected_lenses": ["lens-consistency", "lens-spec-coverage"],
+      "severity": "major"
+    },
+    {
+      "id": "D4",
+      "description": "AC3/R4 (rerun idempotency of backfill) has no automated test; the plan relies on the design plus a manual staging check. The existing FakeWarehouse in tests/conftest.py could cover it.",
+      "location": "plan.md test strategy; fixture/tests/conftest.py",
+      "expected_lenses": ["lens-tests"],
+      "severity": "major"
+    },
+    {
+      "id": "D5",
+      "description": "Plan adds an integration test that runs against the staging warehouse in CI, but the spec says CI has no warehouse access or credentials.",
+      "location": "plan.md test strategy; spec.md non-functional constraints",
+      "expected_lenses": ["lens-consistency"],
+      "severity": "major"
+    },
+    {
+      "id": "D6",
+      "description": "R6/AC4 per-reason breakdown of quarantined counts is not implemented; summary keeps only loaded and quarantined totals.",
+      "location": "plan.md step 5; spec.md R6, AC4",
+      "expected_lenses": ["lens-spec-coverage"],
+      "severity": "minor"
+    }
+  ],
+  "tensions": [
+    {
+      "id": "T1",
+      "lenses": ["lens-architecture", "lens-risk"],
+      "related_defects": ["D1", "D2"],
+      "description": "Architecture's natural fix is to run the backfill through the runner (runner.run with an explicit partitions list), which also gives the risk lens the serialization it wants via run_lock. But in the fixture runner.run holds run.lock for the whole run (a 9-hour backfill would block the nightly job, which then fails on O_EXCL) and calls write_checkpoint after each partition; with newest-first ordering the final checkpoint is 90 days ago, so the next nightly would reprocess ~90 partitions. Both fixes, applied naively, violate the NFR. Only visible by reading runner.py.",
+      "lens_a_fix": "Delete the standalone script and implement backfill by calling runner.run(cfg, wh, today, partitions=[...]).",
+      "lens_b_fix": "Serialize backfill and nightly writes, e.g. have the backfill take the same run.lock so the two never overlap.",
+      "reconciliation": "Reuse runner.process_partition (not run()) for the backfill so the pipeline logic is shared, keep the backfill off the nightly checkpoint, and coordinate only at partition granularity (a short per-partition lock, or skip partitions the nightly job owns, e.g. those newer than the nightly checkpoint) so neither job blocks the other.",
+      "subtle": true
+    },
+    {
+      "id": "T2",
+      "lenses": ["lens-tests", "lens-consistency"],
+      "related_defects": ["D4", "D5"],
+      "description": "Tests wants real automated coverage of rerun idempotency and quarantine behaviour, and the natural place is the planned warehouse integration test (run the backfill twice and compare counts). Consistency wants that integration test removed from CI because CI has no warehouse access. Extending the staging test and deleting it cannot both happen.",
+      "lens_a_fix": "Extend the warehouse integration test to run backfill twice and assert identical counts in both tables.",
+      "lens_b_fix": "Remove the staging-warehouse integration test from CI.",
+      "reconciliation": "Cover AC2/AC3 in CI with unit/component tests against the existing FakeWarehouse (which models replace-partition semantics), with rates injected; keep the staging check as an explicit manual rollout step outside CI.",
+      "subtle": false
+    }
+  ]
+}

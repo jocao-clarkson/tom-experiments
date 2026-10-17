@@ -1,0 +1,6 @@
+[
+  {"id": "p-003", "name": "ledger", "owner": "finance-eng", "tags": ["billing"]},
+  {"id": "p-001", "name": "edge-proxy", "owner": "platform", "tags": ["infra", "network"]},
+  {"id": "p-002", "name": "build-cache", "owner": "platform", "tags": ["infra"]},
+  {"id": "p-004", "name": "notes, drafts", "owner": "docs", "tags": []}
+]

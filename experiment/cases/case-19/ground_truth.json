@@ -1,0 +1,71 @@
+{
+  "case_id": "case-19",
+  "type": "tension",
+  "domain": "cli",
+  "defects": [
+    {
+      "id": "D1",
+      "description": "Plan writes a new collect-local Scrub with only two regexes (emails, Bearer tokens) instead of using internal/redact, which R2 requires. It misses the password/secret, AWS key and IP patterns, so AC1 (password=hunter2 masked) fails and secrets leak into bundles.",
+      "location": "plan.md step 3; fixture/internal/redact/redact.go; spec.md R2, AC1",
+      "expected_lenses": ["lens-architecture", "lens-risk"],
+      "severity": "blocker"
+    },
+    {
+      "id": "D2",
+      "description": "Each file is loaded whole with os.ReadFile and kept in memory as scrubbed bytes until bundling. With multi-GB system logs this violates the bounded-memory NFR.",
+      "location": "plan.md steps 4 and 6; spec.md non-functional constraints",
+      "expected_lenses": ["lens-risk"],
+      "severity": "major"
+    },
+    {
+      "id": "D3",
+      "description": "--include-system path selection (AC4, Linux vs macOS, missing/unreadable file) has no unit-level test; the only coverage is a host-dependent e2e test.",
+      "location": "plan.md test strategy; spec.md AC4",
+      "expected_lenses": ["lens-tests"],
+      "severity": "major"
+    },
+    {
+      "id": "D4",
+      "description": "The e2e test reads the CI runner's real system log, contradicting the NFR that tests must not depend on host log files and must run unprivileged on Linux, macOS and Windows (no such file on Windows; often unreadable on Linux).",
+      "location": "plan.md test strategy; spec.md non-functional constraints",
+      "expected_lenses": ["lens-consistency"],
+      "severity": "major"
+    },
+    {
+      "id": "D5",
+      "description": "Skipped/unreadable files make the command exit 1, but R5/AC3 and the existing ExitPartial constant require exit 3.",
+      "location": "plan.md step 9; fixture/internal/cli/root.go; spec.md R5, AC3",
+      "expected_lenses": ["lens-consistency"],
+      "severity": "major"
+    },
+    {
+      "id": "D6",
+      "description": "Plan adds a per-command --json flag instead of using the global --output flag and env.Out Printer, contradicting R6 and the existing CLI convention.",
+      "location": "plan.md steps 1 and 9; fixture/internal/cli/root.go; spec.md R6",
+      "expected_lenses": ["lens-architecture", "lens-consistency"],
+      "severity": "minor"
+    }
+  ],
+  "tensions": [
+    {
+      "id": "T1",
+      "lenses": ["lens-architecture", "lens-risk"],
+      "related_defects": ["D1", "D2"],
+      "description": "Architecture's natural fix is to replace the local Scrub with the shared redact package, and the obvious entry point for whole files is redact.Lines. But redact.Lines accumulates every scrubbed line in a []string, so it holds the entire file in memory, which is exactly what risk flags. Also bundle.Writer.AddFile needs the final size up front, which pushes toward buffering redacted content. Both natural fixes collide on how the file is read; visible only in redact.go and bundle.go.",
+      "lens_a_fix": "Delete collect/scrub.go and redact each file with redact.Lines.",
+      "lens_b_fix": "Stream files line by line instead of loading them into memory.",
+      "reconciliation": "Reuse the shared rules via redact.Line (or a new streaming redact.Stream(r, w) in the redact package that Lines delegates to), streaming each file into a temp file in the output directory; take the redacted size from the temp file for the cap and for AddFile, then stream it into the bundle and delete it. Memory stays bounded and the redaction rules stay in one place.",
+      "subtle": true
+    },
+    {
+      "id": "T2",
+      "lenses": ["lens-tests", "lens-consistency"],
+      "related_defects": ["D3", "D4"],
+      "description": "Tests wants AC4 actually verified, and the plan's only coverage is the e2e test, so the natural fix is to keep and harden it (e.g. assert inclusion on each OS). Consistency wants that e2e removed because CI forbids depending on host log files and runs on Windows and unprivileged runners. Both cannot be followed.",
+      "lens_a_fix": "Keep the e2e --include-system test and make its assertions stronger across OSes.",
+      "lens_b_fix": "Remove the e2e test that reads the runner's real system log.",
+      "reconciliation": "Make the system log locations injectable (a package-level map keyed by GOOS, or a parameter to Discover) and unit test path selection, presence/absence and unreadable-file handling with temp files; drop the host-dependent e2e from CI.",
+      "subtle": false
+    }
+  ]
+}

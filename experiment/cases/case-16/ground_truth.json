@@ -1,0 +1,71 @@
+{
+  "case_id": "case-16",
+  "type": "tension",
+  "domain": "api",
+  "defects": [
+    {
+      "id": "D1",
+      "description": "Prices are applied as up to 500 sequential single-row UPDATE round trips inside one transaction with no lock or statement timeout, so locks on products rows accumulate for the whole loop. This threatens the 2 s p95 and the NFR about holding checkout-visible row locks briefly.",
+      "location": "plan.md step 4; spec.md non-functional constraints",
+      "expected_lenses": ["lens-risk"],
+      "severity": "major"
+    },
+    {
+      "id": "D2",
+      "description": "Unknown SKUs are skipped and reported in a 'skipped' list while the rest of the batch is applied. Spec R2/AC2 make unknown SKUs validation errors: respond 422 and apply nothing.",
+      "location": "plan.md steps 4 and 7; spec.md R2, AC2",
+      "expected_lenses": ["lens-consistency", "lens-spec-coverage"],
+      "severity": "major"
+    },
+    {
+      "id": "D3",
+      "description": "Plan adds a Store.DB() accessor and runs raw SQL in the api handler, breaking the fixture rule that the store package is the only one issuing SQL, instead of adding a store method.",
+      "location": "plan.md steps 3-4; fixture/internal/store/store.go",
+      "expected_lenses": ["lens-architecture"],
+      "severity": "major"
+    },
+    {
+      "id": "D4",
+      "description": "Outbox events are written in a second transaction after the price commit. Spec R4 requires them in the same transaction; a failure between the two loses events for committed price changes.",
+      "location": "plan.md step 5; spec.md R4",
+      "expected_lenses": ["lens-consistency", "lens-risk"],
+      "severity": "major"
+    },
+    {
+      "id": "D5",
+      "description": "Route is registered without auth.RequireScope(\"catalog:write\"); R6/AC4 require the scope check (and the single-item route already uses it). Relying on gateway reachability is not authorization.",
+      "location": "plan.md step 8; fixture/internal/api/router.go; spec.md R6, AC4",
+      "expected_lenses": ["lens-spec-coverage", "lens-risk"],
+      "severity": "blocker"
+    },
+    {
+      "id": "D6",
+      "description": "No test covers all-or-nothing behaviour (AC2: nothing applied on an invalid item, AC3: rollback on DB failure) or the 403 path (AC4); the integration test covers only the happy path and timing.",
+      "location": "plan.md test strategy; spec.md AC2, AC3, AC4",
+      "expected_lenses": ["lens-tests"],
+      "severity": "major"
+    }
+  ],
+  "tensions": [
+    {
+      "id": "T1",
+      "lenses": ["lens-risk", "lens-consistency"],
+      "related_defects": ["D1", "D2"],
+      "description": "Risk's natural fix for long lock holds is to commit the batch in chunks (e.g. 100 items per transaction). Consistency insists on R2/R3 all-or-nothing semantics (reject the whole batch on any unknown SKU, single transaction). Chunked commits make partial application possible again, exactly what the spec exists to prevent.",
+      "lens_a_fix": "Split the 500 updates into smaller transactions committed separately to bound lock hold time.",
+      "lens_b_fix": "Apply all items in one transaction and reject the entire request with 422 if any SKU is unknown.",
+      "reconciliation": "Keep a single transaction but make it short: check SKU existence for all items with one SELECT before opening it (422 on any unknown), then apply all prices with one set-based UPDATE ... FROM (VALUES ...) or a batched statement, and set a local lock_timeout/statement_timeout so checkout is not stalled.",
+      "subtle": false
+    },
+    {
+      "id": "T2",
+      "lenses": ["lens-architecture", "lens-consistency"],
+      "related_defects": ["D3", "D4"],
+      "description": "Architecture's natural fix is to drop the raw SQL and call the existing store.UpdatePrice per item, which also writes the outbox event atomically. But UpdatePrice wraps each call in its own WithTx transaction, so looping over it commits each item separately, breaking R3 (single transaction) and making the outbox writes per-item rather than in one transaction. Consistency wants prices and outbox rows in one transaction. Reusing the existing method as-is cannot satisfy that; only visible in store.go.",
+      "lens_a_fix": "Remove Store.DB() and the handler SQL; call store.UpdatePrice for each item.",
+      "lens_b_fix": "Write the price updates and all outbox events in one transaction.",
+      "reconciliation": "Add a store method (e.g. UpdatePrices(ctx, items)) that uses WithTx once and, inside it, applies the updates and calls outbox.Enqueue for each SKU, factoring the shared body of UpdatePrice into an unexported tx-taking helper so the single-item path is unchanged. Handler stays SQL-free and invalidates the cache after commit.",
+      "subtle": true
+    }
+  ]
+}

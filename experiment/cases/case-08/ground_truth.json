@@ -1,0 +1,78 @@
+{
+  "case_id": "case-08",
+  "type": "tension",
+  "domain": "auth",
+  "defects": [
+    {
+      "id": "D1",
+      "description": "Key hashing is implemented ad hoc with hashlib.sha256 in routes/api_keys.py, and principal.py imports it from the routes module. This bypasses security/hashing.py, which the codebase designates as the single place for stored-secret hashing, and makes the auth layer depend on a route module.",
+      "location": "plan.md steps 2 and 7; fixture/authsvc/security/hashing.py",
+      "expected_lenses": ["lens-architecture"],
+      "severity": "major"
+    },
+    {
+      "id": "D2",
+      "description": "Verification compares hashes with '==' (not constant-time) and uses an unkeyed SHA-256, although settings already provides a secret_pepper for keyed hashing. Anyone who reads the DB can check candidate keys offline, and the comparison leaks timing.",
+      "location": "plan.md steps 2 and 7; fixture/authsvc/settings.py",
+      "expected_lenses": ["lens-risk"],
+      "severity": "minor"
+    },
+    {
+      "id": "D3",
+      "description": "The 5-minute in-process lookup cache, invalidated only on the instance that handled the DELETE, means a revoked key keeps working on the other instances for up to 5 minutes. This contradicts R4/AC3 (rejected within 60 s on every instance).",
+      "location": "plan.md step 8; spec.md R4, AC3",
+      "expected_lenses": ["lens-consistency"],
+      "severity": "blocker"
+    },
+    {
+      "id": "D4",
+      "description": "last_used_at is updated synchronously on every authenticated request. At 2k rps this creates row-lock contention and latency on hot keys, and it contradicts R5/AC5 (at most once per minute per key) and the no-lock-contention constraint.",
+      "location": "plan.md step 9; spec.md R5, AC5, non-functional constraints",
+      "expected_lenses": ["lens-risk", "lens-spec-coverage"],
+      "severity": "major"
+    },
+    {
+      "id": "D5",
+      "description": "The audit metadata embeds the whole create response, which carries the secret under the field name 'api_key'. audit.scrub() only drops password/secret/token/recovery_code, so the plaintext key is persisted in audit_events, violating AC4 and the never-log-secrets constraint.",
+      "location": "plan.md steps 3-4; fixture/authsvc/audit.py SENSITIVE_KEYS",
+      "expected_lenses": ["lens-risk"],
+      "severity": "blocker"
+    },
+    {
+      "id": "D6",
+      "description": "Step 6 adds a key rotation endpoint. Key rotation is explicitly out of scope.",
+      "location": "plan.md step 6; spec.md out of scope",
+      "expected_lenses": ["lens-spec-coverage"],
+      "severity": "minor"
+    },
+    {
+      "id": "D7",
+      "description": "There are no tests for AC3 (revocation honoured within 60 s across instances), AC5 (write throttling), or AC4 (no secret in DB, audit or logs). The suite only covers single-instance, happy-path behaviour.",
+      "location": "plan.md test strategy",
+      "expected_lenses": ["lens-tests"],
+      "severity": "major"
+    }
+  ],
+  "tensions": [
+    {
+      "id": "T1",
+      "lenses": ["lens-architecture", "lens-risk"],
+      "related_defects": ["D1", "D2"],
+      "description": "Architecture's natural fix is to route key hashing through the existing hash_secret/verify_secret, which the hashing module says all stored secrets must use. Those use argon2 tuned to about 50 ms per call, and verifying on every request at 2k rps would blow the 5 ms p95 budget and make random sk_live_ tokens a cheap CPU DoS. Risk's natural fix keeps a fast hash but hardens it with a pepper and a constant-time compare, which goes against the 'one hashing path' convention. The conflict only shows up once you read the argon2 parameters in the fixture.",
+      "lens_a_fix": "Delete the inline sha256 helper and use security.hashing.hash_secret / verify_secret for API keys, like every other stored secret.",
+      "lens_b_fix": "Keep a fast hash for high-entropy keys, but use HMAC-SHA256 with settings.secret_pepper and hmac.compare_digest.",
+      "reconciliation": "Add hash_api_key/verify_api_key (HMAC-SHA256 with the pepper, compare_digest) to security/hashing.py next to the argon2 helpers, with a docstring explaining why high-entropy keys use a fast keyed hash. Both principal.py and the routes import from there; argon2 stays for passwords and recovery codes.",
+      "subtle": true
+    },
+    {
+      "id": "T2",
+      "lenses": ["lens-consistency", "lens-risk"],
+      "related_defects": ["D3", "D4"],
+      "description": "Consistency's fix for the revocation window is to shorten or remove the in-process cache so revocation takes effect within 60 s. Risk's natural fix for the per-request last_used_at UPDATE is to throttle writes using the cache entry, writing only when the entry is refreshed, which depends on long-lived cache entries. With 6 instances, a cache-based throttle also allows several writes per minute per key, so AC5 still fails. The two fixes pull the cache TTL in opposite directions.",
+      "lens_a_fix": "Cut the lookup cache TTL to 60 s or less (or drop it) so revoked keys are rejected everywhere within 60 s.",
+      "lens_b_fix": "Throttle last_used_at by only writing when the per-instance cache entry is created or refreshed, and move the write off the request path.",
+      "reconciliation": "Decouple the two. Cache lookups for 30 s or less (well inside the 60 s window, cheap at 2k rps). Throttle last_used_at in the database with a conditional, asynchronous UPDATE ... WHERE id = %s AND (last_used_at IS NULL OR last_used_at < now() - interval '1 minute'), which caps writes at about one per minute per key across all instances without relying on cache lifetime.",
+      "subtle": true
+    }
+  ]
+}

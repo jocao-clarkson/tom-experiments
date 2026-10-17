@@ -1,0 +1,71 @@
+{
+  "case_id": "case-05",
+  "type": "tension",
+  "domain": "mobile-backend",
+  "defects": [
+    {
+      "id": "D1",
+      "description": "The push job is enqueued with attempts: 1 and per-device failures other than an invalid token are only logged. A transient gateway timeout or 5xx means the device never gets the push, which contradicts AC2 ('the failed device is retried') and the backoff constraint.",
+      "location": "plan.md steps 5-6; spec.md AC2, non-functional constraints",
+      "expected_lenses": ["lens-risk"],
+      "severity": "major"
+    },
+    {
+      "id": "D2",
+      "description": "The plan's at-most-once argument rests on assumptions the spec does not make: that the apps collapse duplicate notifications, and that the transition guard covers every duplicate. It treats 'no retries' as the only way to meet the per-device at-most-once constraint. The spec puts at-most-once on the server, per device, and still expects retries (AC2).",
+      "location": "plan.md steps 6 and 8; spec.md non-functional constraints, AC1, AC2",
+      "expected_lenses": ["lens-consistency"],
+      "severity": "major"
+    },
+    {
+      "id": "D3",
+      "description": "Plan edits the shared OrderService.updateStatus and adds a JobQueue constructor dependency to it, coupling the order domain to push delivery. The fixture already has an orderEvents bus (onStatusChanged) for exactly this kind of side effect, and changing the constructor touches every OrderService caller and test.",
+      "location": "plan.md step 7; fixture/src/orders/orderService.ts; fixture/src/orders/orderEvents.ts",
+      "expected_lenses": ["lens-architecture"],
+      "severity": "major"
+    },
+    {
+      "id": "D4",
+      "description": "The job is enqueued inside the transaction callback, before COMMIT. pg-boss uses its own connection, so the job is durable even if the transaction later rolls back (the history insert can still fail), which breaks AC3. The worker can also pick it up before the status change is visible.",
+      "location": "plan.md step 7; fixture/src/orders/orderService.ts; fixture/src/jobs/queue.ts; spec.md AC3",
+      "expected_lenses": ["lens-risk"],
+      "severity": "major"
+    },
+    {
+      "id": "D5",
+      "description": "R5/AC5 (skip users with notifications.orderUpdates=false) is not implemented anywhere in the plan, even though PreferencesRepo.get exists.",
+      "location": "plan.md steps 4-5; spec.md R5, AC5; fixture/src/users/preferences.ts",
+      "expected_lenses": ["lens-spec-coverage"],
+      "severity": "major"
+    },
+    {
+      "id": "D6",
+      "description": "The tests do not cover AC2 (partial gateway failure and retry), AC3 (rollback sends nothing), or AC5. AC6 is declared 'satisfied by design' with no test.",
+      "location": "plan.md test strategy",
+      "expected_lenses": ["lens-tests"],
+      "severity": "major"
+    }
+  ],
+  "tensions": [
+    {
+      "id": "T1",
+      "lenses": ["lens-risk", "lens-consistency"],
+      "related_defects": ["D1", "D2"],
+      "description": "Risk's natural fix is to give the order-push job retries with backoff. The fixture's JobQueue retries a failing handler as a whole, so the handler, which loops over every device, re-sends to devices that already got the push. That breaks the at-most-once-per-device constraint consistency is enforcing. Consistency's literal fix (keep a single attempt) leaves AC2 unmet. The conflict only shows up once you see how queue.ts retries.",
+      "lens_a_fix": "Enqueue order-push with attempts > 1 and backoff, and throw on retryable send failures so pg-boss retries.",
+      "lens_b_fix": "Keep the job single-attempt so no device ever receives two pushes for one status change.",
+      "reconciliation": "Fan out to one job per device (for example 'order-push-device' with singletonKey orderId:status:token), each with bounded attempts and backoff, retrying only retryable results. Optionally record per-device delivery before sending. That gives retries for failed devices and at most one push per device.",
+      "subtle": true
+    },
+    {
+      "id": "T2",
+      "lenses": ["lens-architecture", "lens-risk"],
+      "related_defects": ["D3", "D4"],
+      "description": "Architecture's natural fix is to stop editing OrderService and subscribe a listener to orderEvents.onStatusChanged that enqueues the job. In the fixture, emitStatusChanged fires inside the transaction, before the history insert and COMMIT, so the listener reproduces exactly the pre-commit enqueue risk objects to. Risk's fix (enqueue after the transaction resolves) means changing updateStatus, which architecture wants to avoid.",
+      "lens_a_fix": "Remove the enqueue from updateStatus and register an orderEvents.onStatusChanged listener in the worker/app wiring that enqueues order-push.",
+      "lens_b_fix": "Enqueue only after the transaction has committed, for example after transaction() resolves in updateStatus.",
+      "reconciliation": "Use the event bus, but make OrderService emit statusChanged after COMMIT (or add a post-commit event). That is a small, contained change to shared code that keeps push logic out of the order domain and guarantees no push for rolled-back changes. Better still, enqueue through a transactional outbox if one is introduced later.",
+      "subtle": true
+    }
+  ]
+}

@@ -1,0 +1,97 @@
+{
+  "case_id": "case-22",
+  "type": "tension",
+  "domain": "data-pipeline",
+  "defects": [
+    {
+      "id": "D1",
+      "description": "Plan converts amounts with strconv.ParseFloat * 100 and math.Round in a new helper instead of the shared money.Parse. Floating point can mis-round, and the hardcoded factor of 100 is wrong for JPY (exponent 0) and KWD (exponent 3), which breaks R2's 'same rules as orders'.",
+      "location": "plan.md step 3; fixture/internal/money/money.go",
+      "expected_lenses": [
+        "lens-architecture",
+        "lens-risk"
+      ],
+      "severity": "major"
+    },
+    {
+      "id": "D2",
+      "description": "Plan reads every record of a file into a slice and sorts it before processing. A 2M-row file held as map-based records will blow the 512 MB RSS budget (AC4) and breaks the streaming NFR. The existing CSV reader streams.",
+      "location": "plan.md step 5; fixture/internal/extract/csvreader.go",
+      "expected_lenses": [
+        "lens-risk"
+      ],
+      "severity": "major"
+    },
+    {
+      "id": "D3",
+      "description": "Daily aggregates are applied as increments (refunds_minor = refunds_minor + chunk total). Re-running the job adds the same refunds again even though the refunds upsert is idempotent, which violates R6/AC3. It also departs from the fixture pattern, where the touched days are rebuilt with RecomputeDailyRevenue.",
+      "location": "plan.md step 7; fixture/internal/load/store.go; fixture/internal/pipeline/orders.go",
+      "expected_lenses": [
+        "lens-consistency",
+        "lens-architecture"
+      ],
+      "severity": "blocker"
+    },
+    {
+      "id": "D4",
+      "description": "Dead-letter file contains only refund_id and deadletter_reason, but R4 requires the original row so it can be replayed once the order arrives.",
+      "location": "plan.md step 8; spec.md R4",
+      "expected_lenses": [
+        "lens-spec-coverage"
+      ],
+      "severity": "major"
+    },
+    {
+      "id": "D5",
+      "description": "Plan logs every dead-lettered record with %v, which writes customer_email unmasked to logs and violates the PII constraint. pii.RedactRow exists for this.",
+      "location": "plan.md step 9; fixture/internal/pii/pii.go",
+      "expected_lenses": [
+        "lens-risk"
+      ],
+      "severity": "major"
+    },
+    {
+      "id": "D6",
+      "description": "No automated test for rerun idempotency (AC3) or for the aggregate math (it is checked by hand against staging), and AC4 performance and memory are not tested at all.",
+      "location": "plan.md Test strategy",
+      "expected_lenses": [
+        "lens-tests"
+      ],
+      "severity": "major"
+    }
+  ],
+  "tensions": [
+    {
+      "id": "T1",
+      "lenses": [
+        "lens-consistency",
+        "lens-risk"
+      ],
+      "related_defects": [
+        "D3",
+        "D2"
+      ],
+      "description": "Consistency's natural fix for double counting is to recompute aggregates from the refunds table once the whole load is finished, which reads naturally off the plan's 'load everything, sort, then aggregate' structure. Risk's natural fix for memory is to stream and update aggregates per batch as rows go past, and per-batch updates in the plan's style are exactly the non-idempotent increments. The fixes conflict on when and how aggregation happens.",
+      "lens_a_fix": "Replace the incremental UPDATE with a recompute of daily_revenue from source tables after the load, so reruns are idempotent.",
+      "lens_b_fix": "Do not buffer the whole file; stream records in batches and apply each batch's effects as it is processed.",
+      "reconciliation": "Stream in batches as orders.go does. Upsert each batch, keep only a small set of touched (day, currency) keys, and once all files are done call an extended RecomputeDailyRevenue that also sums refunds and sets refunds_minor and net_minor. Drop the in-memory sort. Memory stays bounded and reruns stay idempotent.",
+      "subtle": true
+    },
+    {
+      "id": "T2",
+      "lenses": [
+        "lens-spec-coverage",
+        "lens-risk"
+      ],
+      "related_defects": [
+        "D4",
+        "D5"
+      ],
+      "description": "Coverage wants the full original row in the dead-letter file to meet R4. Risk wants customer_email kept out of every artifact outside the warehouse, and the dead-letter directory is readable by another team. Copying the full row satisfies one and violates the other.",
+      "lens_a_fix": "Write the full original CSV row plus deadletter_reason to the dead-letter file.",
+      "lens_b_fix": "Keep customer_email out of logs and team-readable files; mask via pii.RedactRow or omit row contents.",
+      "reconciliation": "Write every original column to the dead-letter file, but run customer_email through pii.RedactRow (or drop it). Replay does not need the email, since the refunds table does not store it. Log only refund_id and the reason, or a redacted row.",
+      "subtle": false
+    }
+  ]
+}

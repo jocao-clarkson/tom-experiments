@@ -1,0 +1,15 @@
+[project]
+name = "logship"
+version = "0.9.4"
+description = "Collect, bundle and ship device logs to the support bucket"
+requires-python = ">=3.11"
+dependencies = ["httpx>=0.27"]
+
+[project.scripts]
+logship = "logship.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,71 @@
+{
+  "case_id": "case-15",
+  "type": "tension",
+  "domain": "mobile-backend",
+  "defects": [
+    {
+      "id": "D1",
+      "description": "Plan builds a new offset-based inbox cursor (src/lib/inboxCursor.ts, OFFSET query) instead of the shared keyset helper in src/lib/pagination.ts. Offset paging duplicates/skips rows when new notifications arrive (violates AC1) and departs from the existing list convention.",
+      "location": "plan.md steps 3-4; fixture/src/lib/pagination.ts; spec.md AC1",
+      "expected_lenses": ["lens-architecture", "lens-risk"],
+      "severity": "major"
+    },
+    {
+      "id": "D2",
+      "description": "Plan caps limit at 100; spec R1/AC2 require limits above 50 to be treated as 50.",
+      "location": "plan.md step 3; spec.md R1, AC2",
+      "expected_lenses": ["lens-consistency"],
+      "severity": "major"
+    },
+    {
+      "id": "D3",
+      "description": "markRead updates by notification id only, with no user_id filter, so any authenticated user can mark another user's notification read (violates R2/AC4).",
+      "location": "plan.md steps 2 and 6; spec.md R2, AC4",
+      "expected_lenses": ["lens-risk"],
+      "severity": "blocker"
+    },
+    {
+      "id": "D4",
+      "description": "The UPDATE includes `AND read_at IS NULL` and the handler returns 404 when rowCount is 0, so marking an already-read notification returns 404, contradicting R2/AC3 (idempotent 204).",
+      "location": "plan.md step 6; spec.md R2, AC3",
+      "expected_lenses": ["lens-consistency"],
+      "severity": "major"
+    },
+    {
+      "id": "D5",
+      "description": "Test strategy has no test for cross-user access (AC4), for repeat mark-read (AC3), or for paging stability under inserts (AC1); the mocked-pool tests cannot detect the missing user filter.",
+      "location": "plan.md test strategy; spec.md AC1, AC3, AC4",
+      "expected_lenses": ["lens-tests"],
+      "severity": "major"
+    },
+    {
+      "id": "D6",
+      "description": "R4 (POST /v1/notifications/read-all) and AC5 are not implemented; the plan defers mark-all-read to a later release.",
+      "location": "plan.md rollout notes; spec.md R4, AC5",
+      "expected_lenses": ["lens-spec-coverage"],
+      "severity": "major"
+    }
+  ],
+  "tensions": [
+    {
+      "id": "T1",
+      "lenses": ["lens-architecture", "lens-consistency"],
+      "related_defects": ["D1", "D2"],
+      "description": "Architecture's natural fix is to reuse parseLimit/decodeCursor/toPage from src/lib/pagination.ts. But parseLimit clamps to the module constant MAX_LIMIT = 100 with no per-endpoint option, so reusing it as-is keeps the 100 cap that consistency wants changed to 50. The obvious alternative for consistency (set the cap to 50) would mean editing a shared constant used by every list endpoint. Visible only in the fixture helper.",
+      "lens_a_fix": "Delete inboxCursor.ts and use the shared keyset pagination helper (parseLimit, decodeCursor, toPage).",
+      "lens_b_fix": "Cap limit at 50 for the inbox as R1 requires.",
+      "reconciliation": "Reuse the shared helper but give parseLimit an optional max argument (defaulting to MAX_LIMIT so the activity feed and other callers are unchanged) and pass 50 from the inbox route; add a test for both caps.",
+      "subtle": true
+    },
+    {
+      "id": "T2",
+      "lenses": ["lens-risk", "lens-consistency"],
+      "related_defects": ["D3", "D4"],
+      "description": "Risk's natural fix adds `AND user_id = $2` and keeps 'rowCount 0 means 404' so other users' notifications are not found. Consistency's natural fix for idempotency is to stop treating rowCount 0 as an error (return 204). With the `read_at IS NULL` guard still in place, the two cannot both hold: rowCount 0 means either 'already read' or 'not yours/not found', and one fix breaks the other's AC.",
+      "lens_a_fix": "Filter the UPDATE by user_id and return 404 when no row matches.",
+      "lens_b_fix": "Return 204 when no row is updated, so repeat calls are idempotent.",
+      "reconciliation": "Drop the read_at IS NULL predicate and use `SET read_at = COALESCE(read_at, now()) WHERE id = $1 AND user_id = $2`: rowCount 0 now means only 'not found or not owned' (404), while an already-read row still matches and keeps its first read_at (204). Test AC3 and AC4 explicitly.",
+      "subtle": true
+    }
+  ]
+}

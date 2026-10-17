@@ -1,0 +1,106 @@
+{
+  "case_id": "case-28",
+  "type": "tension",
+  "domain": "auth",
+  "defects": [
+    {
+      "id": "D1",
+      "description": "Audit metadata includes 'the rotate response payload', which contains the new key's plaintext. That violates R6/AC6 (secrets never in audit events), and the plan has no test for AC6.",
+      "location": "plan.md step 8",
+      "expected_lenses": [
+        "lens-risk"
+      ],
+      "severity": "blocker"
+    },
+    {
+      "id": "D2",
+      "description": "The request uses grace_hours (default 24, max 168) instead of the spec's grace_seconds (default 86400, max 604800). That is a parameter name and unit drift, so AC1 (3600 seconds) and AC4 (604801) can't be expressed. The tests use grace_hours: 169 accordingly.",
+      "location": "plan.md step 1; plan.md Test strategy",
+      "expected_lenses": [
+        "lens-consistency"
+      ],
+      "severity": "major"
+    },
+    {
+      "id": "D3",
+      "description": "New keys are generated ad hoc (32-byte hex, bcrypt hash, prefix taken from the secret) instead of with apikey.Generate. Verifier.Verify expects the lk_<prefix>_<secret> format and a sha256 hash, so rotated keys never authenticate. This violates the NFR 'existing key format and hashing', and putting the prefix inside the secret also leaks secret bytes.",
+      "location": "plan.md step 3; fixture/internal/apikey/apikey.go",
+      "expected_lenses": [
+        "lens-architecture",
+        "lens-risk"
+      ],
+      "severity": "blocker"
+    },
+    {
+      "id": "D4",
+      "description": "Revocation only evicts the key from the cache of the instance that handled the request. The other 11 instances keep accepting the key from their verifier cache for up to the 10-minute default TTL, which violates R4/AC2 (within 5 seconds on all instances). Grace-period expiry lags the same way. The AC2 test only checks the same instance.",
+      "location": "plan.md steps 6-7; plan.md Test strategy; fixture/internal/apikey/apikey.go, cache.go",
+      "expected_lenses": [
+        "lens-risk"
+      ],
+      "severity": "blocker"
+    },
+    {
+      "id": "D5",
+      "description": "The plan exports the verifier's internal cache (Verifier.Cache) and has the HTTP handler reach into it, which breaks the apikey package's encapsulation and couples request handlers to the auth hot-path internals.",
+      "location": "plan.md step 7",
+      "expected_lenses": [
+        "lens-architecture"
+      ],
+      "severity": "minor"
+    },
+    {
+      "id": "D6",
+      "description": "Audit events are written with a raw INSERT from the handler via a type assertion on Store, bypassing the audit package. The insert also happens after commit rather than in the transaction, as Create does with audit.RecordTx.",
+      "location": "plan.md step 8; fixture/internal/audit/audit.go; fixture/internal/httpapi/keys.go",
+      "expected_lenses": [
+        "lens-architecture"
+      ],
+      "severity": "major"
+    },
+    {
+      "id": "D7",
+      "description": "Audit failures are logged and ignored, and the operation still succeeds. That contradicts R5/AC3 (if the audit write fails the operation fails and nothing changes), and AC3 has no test.",
+      "location": "plan.md step 8; spec.md R5, AC3",
+      "expected_lenses": [
+        "lens-consistency",
+        "lens-tests"
+      ],
+      "severity": "major"
+    }
+  ],
+  "tensions": [
+    {
+      "id": "T1",
+      "lenses": [
+        "lens-risk",
+        "lens-architecture"
+      ],
+      "related_defects": [
+        "D4",
+        "D5"
+      ],
+      "description": "Risk sees that local cache eviction can't meet 'all instances within 5s' and naturally recommends removing the verification cache or checking revoked_at in the database on every request. Architecture objects to exporting the cache and wants an encapsulated Verifier.Invalidate method instead, which keeps the cache but is still local-only. Risk's fix breaks the NFR (no per-request DB round trip, p99 under 2 ms, about 20k rps), while architecture's fix leaves revocation broken. You only see the conflict after reading the fixture's 10-minute cache TTL.",
+      "lens_a_fix": "Remove the verifier cache (or bypass it) so every request checks revocation and expiry in the database.",
+      "lens_b_fix": "Keep the cache unexported; add an Invalidate method on Verifier instead of exposing Verifier.Cache to handlers.",
+      "reconciliation": "Neither export the cache nor remove it. Construct the Verifier with cacheTTL at most 5s (NewVerifier already takes it as a parameter). Each instance then re-reads a key at most once every 5 seconds, which meets R4 and AC1 timing across all 12 instances with no pub/sub and no per-request DB call. Drop step 7, and test AC2 with two Verifier instances and clock.Fixed.",
+      "subtle": true
+    },
+    {
+      "id": "T2",
+      "lenses": [
+        "lens-architecture",
+        "lens-consistency"
+      ],
+      "related_defects": [
+        "D6",
+        "D7"
+      ],
+      "description": "Architecture wants the raw INSERT replaced with the audit package, and the obvious entry point is Recorder.Record. Consistency wants an audit failure to abort the operation. Record is asynchronous and fire-and-forget (it drops events when the buffer is full), so following architecture's natural fix makes the R5 guarantee impossible. You only see this after reading audit.go.",
+      "lens_a_fix": "Use the audit package (Recorder.Record) instead of a hand-written INSERT.",
+      "lens_b_fix": "Make an audit write failure fail the rotate/revoke request and roll back the change.",
+      "reconciliation": "Call audit.RecordTx(ctx, ex, ev) inside the same Store.WithTx as the key changes, as KeysAPI.Create already does. A failed audit write then rolls back the new key and the expiry (AC3). Keep plaintext out of the metadata, and add a test that injects an audit Exec error and asserts a 500 and no new key.",
+      "subtle": true
+    }
+  ]
+}

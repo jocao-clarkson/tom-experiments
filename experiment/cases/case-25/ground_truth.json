@@ -1,0 +1,115 @@
+{
+  "case_id": "case-25",
+  "type": "tension",
+  "domain": "mobile-backend",
+  "defects": [
+    {
+      "id": "D1",
+      "description": "PUT is implemented as a partial merge (absent fields keep their stored values), but R2 specifies full replacement with all fields required and 422 invalid_preferences when any is missing. AC2's round-trip semantics differ as well.",
+      "location": "plan.md step 4; spec.md R2",
+      "expected_lenses": [
+        "lens-consistency"
+      ],
+      "severity": "major"
+    },
+    {
+      "id": "D2",
+      "description": "The quiet-hours check startMin <= now < endMin is wrong for windows that cross midnight (22:00-07:00 never matches), so AC3 fails. The planned tests only use a same-day 09:00-17:00 window and miss the case.",
+      "location": "plan.md step 6; plan.md Test strategy",
+      "expected_lenses": [
+        "lens-risk",
+        "lens-tests"
+      ],
+      "severity": "blocker"
+    },
+    {
+      "id": "D3",
+      "description": "Handlers take *sql.DB and run SQL inline, bypassing the repository layering the codebase uses (devices.Repo is the only code touching its table). It also leaves the sender's prefs reader without a clear owner.",
+      "location": "plan.md steps 3-4; fixture/internal/devices/repo.go",
+      "expected_lenses": [
+        "lens-architecture"
+      ],
+      "severity": "minor"
+    },
+    {
+      "id": "D4",
+      "description": "Step 8 implements deferred delivery after quiet hours end, which is explicitly out of scope ('Delivering suppressed notifications after quiet hours end'). R5 says skipped notifications are dropped.",
+      "location": "plan.md step 8; spec.md Out of scope, R5",
+      "expected_lenses": [
+        "lens-spec-coverage",
+        "lens-consistency"
+      ],
+      "severity": "major"
+    },
+    {
+      "id": "D5",
+      "description": "The deferral queue is an unbounded in-process slice with a polling goroutine. Entries are lost on every restart or deploy, memory grows without limit, and with several worker replicas the delivery behaviour is inconsistent.",
+      "location": "plan.md step 8",
+      "expected_lenses": [
+        "lens-risk"
+      ],
+      "severity": "major"
+    },
+    {
+      "id": "D6",
+      "description": "A local writePrefsError emits a flat body, bypassing httpx.Error and the {error:{code,message,details}} envelope that every endpoint returns and that the mobile apps' shared API client decodes.",
+      "location": "plan.md step 5; fixture/internal/httpx/respond.go",
+      "expected_lenses": [
+        "lens-architecture"
+      ],
+      "severity": "major"
+    },
+    {
+      "id": "D7",
+      "description": "Error codes and field paths drift from the spec: bad_timezone instead of invalid_timezone, and Go struct paths (QuietHours.TZ) instead of JSON paths (quiet_hours.timezone). That breaks AC4.",
+      "location": "plan.md step 5; spec.md R3, AC4",
+      "expected_lenses": [
+        "lens-consistency"
+      ],
+      "severity": "major"
+    },
+    {
+      "id": "D8",
+      "description": "Timezone validation and conversion use time.LoadLocation, but the image is CGO_ENABLED=0 on distroless/static, which ships no zoneinfo. Every timezone would fail validation and quiet hours could not be evaluated unless time/tzdata is embedded.",
+      "location": "plan.md steps 5-6; fixture/Dockerfile",
+      "expected_lenses": [
+        "lens-risk"
+      ],
+      "severity": "major"
+    }
+  ],
+  "tensions": [
+    {
+      "id": "T1",
+      "lenses": [
+        "lens-spec-coverage",
+        "lens-risk"
+      ],
+      "related_defects": [
+        "D4",
+        "D5"
+      ],
+      "description": "Spec-coverage flags the deferral queue as out-of-scope work and wants it removed. Risk, looking at the same step, wants the queue made durable and bounded (persisted table, replica-safe scheduler). Hardening it adds more infrastructure to a feature the spec excludes, so the two fixes point in opposite directions.",
+      "lens_a_fix": "Remove step 8; suppressed notifications are dropped per R5 and the out-of-scope list.",
+      "lens_b_fix": "Persist deferred notifications in a table with a bounded size and a replica-safe scheduler so nothing is lost on restart.",
+      "reconciliation": "Remove deferral entirely. Drop suppressed pushes and count them with push_suppressed_total{reason=\"quiet_hours\"}. That removes the durability risk instead of engineering around it. Record deferral as a possible follow-up spec.",
+      "subtle": false
+    },
+    {
+      "id": "T2",
+      "lenses": [
+        "lens-architecture",
+        "lens-consistency"
+      ],
+      "related_defects": [
+        "D6",
+        "D7"
+      ],
+      "description": "Architecture wants the custom error writer replaced with httpx.Error so the response uses the shared envelope the mobile client decodes. Consistency wants the error body to match the spec exactly: flat {code, field}, invalid_timezone, quiet_hours.timezone. Switching to httpx.Error makes the body shape differ from the spec, while matching the spec literally keeps a one-off shape that the apps' shared decoder won't parse. The conflict only shows if you read respond.go and its envelope comment.",
+      "lens_a_fix": "Use httpx.Error(w, 422, code, msg, details) like the devices handler does.",
+      "lens_b_fix": "Emit exactly {\"code\": \"invalid_timezone\", \"field\": \"quiet_hours.timezone\"} as R3/AC4 specify.",
+      "reconciliation": "Use httpx.Error with status 422, the spec's code names, and details.field set to the JSON path, as devices.RegisterHandler already does. Flag to the spec owner that the flat shape in R3/AC4 differs from the API-wide envelope, and get AC4 amended so it asserts error.code and error.details.field. Do not ship a one-off body shape.",
+      "subtle": true
+    }
+  ]
+}

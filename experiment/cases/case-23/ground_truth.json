@@ -1,0 +1,109 @@
+{
+  "case_id": "case-23",
+  "type": "tension",
+  "domain": "auth",
+  "defects": [
+    {
+      "id": "D1",
+      "description": "Plan stores the raw reset token in password_resets.token and looks it up by equality, violating R2/AC2 (store only the SHA-256 hash). The fixture already has hashToken, and lookup by hash is just as indexable.",
+      "location": "plan.md steps 1-2; fixture/src/lib/credentials.ts",
+      "expected_lenses": [
+        "lens-risk",
+        "lens-architecture"
+      ],
+      "severity": "blocker"
+    },
+    {
+      "id": "D2",
+      "description": "Unknown email returns 404 account_not_found, which contradicts R1/AC1 (always the same 202) and enables account enumeration.",
+      "location": "plan.md step 4",
+      "expected_lenses": [
+        "lens-consistency",
+        "lens-risk"
+      ],
+      "severity": "blocker"
+    },
+    {
+      "id": "D3",
+      "description": "Only the per-IP limit is implemented. The per-email limit of 5/hour from R5/AC5, which must hold across replicas and silently suppress the email, is missing. The plan also returns an error rather than 202 for limited requests.",
+      "location": "plan.md step 4",
+      "expected_lenses": [
+        "lens-spec-coverage",
+        "lens-risk"
+      ],
+      "severity": "major"
+    },
+    {
+      "id": "D4",
+      "description": "Plan adds ioredis, a new redisLimiter.ts and a Redis instance. That contradicts the NFR of no new infrastructure this quarter, duplicates the existing FixedWindowLimiter, and widens the deploy (steps 9-10, rollout).",
+      "location": "plan.md steps 3, 9, 10, Rollout; fixture/src/lib/rateLimit.ts; spec.md Non-functional constraints",
+      "expected_lenses": [
+        "lens-architecture",
+        "lens-consistency"
+      ],
+      "severity": "major"
+    },
+    {
+      "id": "D5",
+      "description": "Confirm is check-then-act: findByToken, check used_at, update password, then markUsed. Two concurrent confirms can both pass the check and both change the password, violating AC3. It needs an atomic conditional consume (UPDATE ... WHERE used_at IS NULL AND expires_at > now() RETURNING).",
+      "location": "plan.md step 5",
+      "expected_lenses": [
+        "lens-risk"
+      ],
+      "severity": "major"
+    },
+    {
+      "id": "D6",
+      "description": "Tests do not cover expiry (AC4), concurrent double-use (AC3), the unknown-email response (AC1), or the per-email limit (AC5); the injected clock is not used in any test.",
+      "location": "plan.md Test strategy",
+      "expected_lenses": [
+        "lens-tests"
+      ],
+      "severity": "major"
+    },
+    {
+      "id": "D7",
+      "description": "Test strategy relies on a testcontainers Postgres+Redis suite, but the spec says CI runners have no Docker and service/route tests use the in-memory fakes.",
+      "location": "plan.md Test strategy; spec.md Non-functional constraints",
+      "expected_lenses": [
+        "lens-consistency",
+        "lens-tests"
+      ],
+      "severity": "minor"
+    }
+  ],
+  "tensions": [
+    {
+      "id": "T1",
+      "lenses": [
+        "lens-architecture",
+        "lens-risk"
+      ],
+      "related_defects": [
+        "D4",
+        "D3"
+      ],
+      "description": "Architecture's natural fix is to drop Redis and reuse the existing FixedWindowLimiter. Risk's natural fix is to add the missing per-email limit to the plan's limiter. Combine them and the per-email limit lives in a per-process Map on 3 replicas, so the effective limit is about 15/hour and resets on deploy, which fails AC5 ('whichever replica serves it'). The conflict only shows once you see that the fixture limiter is in-memory and the spec says 3 replicas.",
+      "lens_a_fix": "Remove ioredis and redisLimiter.ts; reuse FixedWindowLimiter from src/lib/rateLimit.ts as the login route does.",
+      "lens_b_fix": "Add a per-email (5/hour, silent) limit alongside the per-IP limit in the shared limiter.",
+      "reconciliation": "Keep the in-memory FixedWindowLimiter for the per-IP limit, which the spec calls best-effort. Enforce the per-email limit in Postgres by counting password_resets rows for the user created in the last hour before issuing a token, and return 202 without sending when over. No Redis, and AC5 holds across replicas.",
+      "subtle": true
+    },
+    {
+      "id": "T2",
+      "lenses": [
+        "lens-tests",
+        "lens-consistency"
+      ],
+      "related_defects": [
+        "D6",
+        "D7"
+      ],
+      "description": "Tests wants AC3 (concurrent confirms) and AC4 (expiry) covered, and the natural place to prove a DB-level race is the plan's testcontainers suite. Consistency wants that suite removed because CI has no Docker and the spec mandates fakes. Removing it without a replacement leaves the race untested.",
+      "lens_a_fix": "Add concurrent-confirm and expired-token tests to the Postgres integration suite.",
+      "lens_b_fix": "Drop the testcontainers suite; tests must run on the in-memory fakes.",
+      "reconciliation": "Make ResetRepo expose one atomic consume(tokenHash, now) operation, implemented in Postgres as a conditional UPDATE...RETURNING and in FakeResetRepo as compare-and-set. Test two concurrent confirms with Promise.all and expiry with the injected clock, both against fakes in CI. Check the SQL in code review or staging, not in CI.",
+      "subtle": false
+    }
+  ]
+}

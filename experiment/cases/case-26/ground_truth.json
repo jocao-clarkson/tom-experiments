@@ -1,0 +1,107 @@
+{
+  "case_id": "case-26",
+  "type": "tension",
+  "domain": "api",
+  "defects": [
+    {
+      "id": "D1",
+      "description": "Plan hand-rolls unsigned base64 JSON cursors in the invoices route instead of reusing the signed encodeCursor/decodeCursor in src/lib/pagination.ts. The cursors carry no tenant or filter binding, so they can be forged, and R3/R5/AC2/AC3 (a cursor is only valid for its own tenant and filters) cannot be enforced. This contradicts the NFR that cursors be unforgeable and consistent with /v1/customers.",
+      "location": "plan.md step 3; fixture/src/lib/pagination.ts; fixture/src/routes/customers.ts",
+      "expected_lenses": [
+        "lens-architecture",
+        "lens-risk"
+      ],
+      "severity": "major"
+    },
+    {
+      "id": "D2",
+      "description": "Keyset uses created_at only (created_at < $after, ORDER BY created_at DESC) with no id tie-break, so invoices sharing a timestamp are skipped at page boundaries. That violates R2 and AC1 (60 rows with one created_at).",
+      "location": "plan.md steps 2-3",
+      "expected_lenses": [
+        "lens-consistency",
+        "lens-risk"
+      ],
+      "severity": "blocker"
+    },
+    {
+      "id": "D3",
+      "description": "A malformed cursor silently returns the first page, contradicting R5/AC4 (400 invalid_cursor). The plan's test even asserts the wrong behaviour.",
+      "location": "plan.md step 4; plan.md Test strategy",
+      "expected_lenses": [
+        "lens-consistency"
+      ],
+      "severity": "major"
+    },
+    {
+      "id": "D4",
+      "description": "Plan removes offset support, but R6/AC5 require offset to keep working for 90 days with Deprecation and Link headers and a 400 invalid_pagination when combined with cursor. Removing offset is explicitly out of scope.",
+      "location": "plan.md step 6; spec.md R6, Out of scope",
+      "expected_lenses": [
+        "lens-spec-coverage"
+      ],
+      "severity": "blocker"
+    },
+    {
+      "id": "D5",
+      "description": "Step 1 ships a DDL migration (new index) despite the NFR change freeze that bans migrations in this release.",
+      "location": "plan.md step 1; spec.md Non-functional constraints",
+      "expected_lenses": [
+        "lens-consistency",
+        "lens-spec-coverage"
+      ],
+      "severity": "major"
+    },
+    {
+      "id": "D6",
+      "description": "The performance reasoning is wrong. An index on (tenant_id, status) does not serve ORDER BY created_at DESC, id DESC, so for a common status like 'paid' Postgres may choose it and then sort a large share of 2M rows, missing AC6. Performance is only checked after rollout prep, by EXPLAIN on staging.",
+      "location": "plan.md step 1; plan.md Test strategy; fixture/migrations/003_invoices.sql",
+      "expected_lenses": [
+        "lens-risk"
+      ],
+      "severity": "major"
+    },
+    {
+      "id": "D7",
+      "description": "No tests for the shared-timestamp boundary (AC1 is only tested with distinct timestamps), cross-tenant cursor reuse (AC2), filter mismatch (AC3) or offset deprecation (AC5), and the garbage-cursor test asserts the opposite of AC4.",
+      "location": "plan.md Test strategy",
+      "expected_lenses": [
+        "lens-tests"
+      ],
+      "severity": "major"
+    }
+  ],
+  "tensions": [
+    {
+      "id": "T1",
+      "lenses": [
+        "lens-consistency",
+        "lens-risk"
+      ],
+      "related_defects": [
+        "D5",
+        "D6"
+      ],
+      "description": "Consistency wants the migration removed because of the DDL freeze. Risk sees that the planned index doesn't serve the sort and wants the migration changed to a better composite index, such as (tenant_id, status, created_at, id). One fix deletes the migration and the other rewrites it. The way out depends on noticing that migration 003 already defines (tenant_id, created_at DESC, id DESC).",
+      "lens_a_fix": "Drop migrations/004 entirely; no DDL ships during the freeze.",
+      "lens_b_fix": "Replace the (tenant_id, status) index with a composite index matching the filter plus sort order so AC6 holds.",
+      "reconciliation": "Ship no migration. Write the keyset query as (created_at, id) < ($c, $i) with ORDER BY created_at DESC, id DESC so it walks the existing invoices_tenant_created_idx from 003, applying status and created_after as filters during the walk. Verify AC6 with EXPLAIN ANALYZE before rollout. Note a status-leading composite index as a post-freeze follow-up if the filtered path proves slow.",
+      "subtle": true
+    },
+    {
+      "id": "T2",
+      "lenses": [
+        "lens-architecture",
+        "lens-consistency"
+      ],
+      "related_defects": [
+        "D1",
+        "D3"
+      ],
+      "description": "Architecture's natural fix is to reuse decodeCursor and copy the /v1/customers pattern. That pattern deliberately treats a null (invalid) cursor, or one from another tenant, as 'start from the first page'. Consistency requires 400 invalid_cursor for malformed, tampered or mismatched cursors. Copying the existing route's behaviour reproduces the defect consistency flags, and making the shared helper throw would change /v1/customers, which is out of scope.",
+      "lens_a_fix": "Delete the hand-rolled helpers; use encodeCursor/decodeCursor from lib/pagination.ts the way routes/customers.ts does, including the tenant check.",
+      "lens_b_fix": "Return 400 invalid_cursor for malformed, tampered, wrong-tenant, or wrong-filter cursors per R5/AC2-AC4.",
+      "reconciliation": "Reuse encodeCursor/decodeCursor with the payload {c, i, t: tenantId, f: filter hash}. In the invoices route only, throw ValidationError('invalid_cursor') when decodeCursor returns null or t or f mismatch. Leave lib/pagination.ts and /v1/customers unchanged, since altering the shared helper would change customers' behaviour and that is out of scope.",
+      "subtle": true
+    }
+  ]
+}

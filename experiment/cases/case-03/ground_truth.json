@@ -1,0 +1,85 @@
+{
+  "case_id": "case-03",
+  "type": "tension",
+  "domain": "auth",
+  "defects": [
+    {
+      "id": "D1",
+      "description": "Plan adds a new sliding-window limiter (src/http/resetLimiter.ts) instead of reusing or extending the existing rateLimit helper in src/http/rateLimit.ts, which already does keyed windows with an injectable clock.",
+      "location": "plan.md step 5; fixture/src/http/rateLimit.ts",
+      "expected_lenses": ["lens-architecture"],
+      "severity": "minor"
+    },
+    {
+      "id": "D2",
+      "description": "The rate limiter keeps its counters in process memory. With 3+ instances behind round-robin load balancing and frequent redeploys, the real limit is several times higher and resets on every deploy, so R5/AC5 ('even if requests land on different API instances') is not met.",
+      "location": "plan.md step 5; spec.md R5, AC5, non-functional constraints",
+      "expected_lenses": ["lens-risk"],
+      "severity": "blocker"
+    },
+    {
+      "id": "D3",
+      "description": "Plan creates a new password_reset_tokens table and repository that duplicate OneTimeTokenRepo (hashed storage, atomic consume, revokeAll by purpose), which already exists for email verification and is designed to take new purposes.",
+      "location": "plan.md steps 1-2; fixture/src/db/oneTimeTokenRepo.ts; fixture/migrations/0017_one_time_tokens.sql",
+      "expected_lenses": ["lens-architecture"],
+      "severity": "major"
+    },
+    {
+      "id": "D4",
+      "description": "Token TTL defaults to 60 minutes, while the spec requires 30 minutes (R2, AC2).",
+      "location": "plan.md step 3; spec.md R2, AC2",
+      "expected_lenses": ["lens-consistency"],
+      "severity": "major"
+    },
+    {
+      "id": "D5",
+      "description": "requestReset awaits a mail-provider HTTP call (up to a 5s timeout) and extra DB writes only when the account exists, before returning 202. The difference in response time reveals whether an account exists, against the timing constraint and the intent of AC1.",
+      "location": "plan.md steps 6 and 8; fixture/src/mail/mailer.ts",
+      "expected_lenses": ["lens-risk"],
+      "severity": "major"
+    },
+    {
+      "id": "D6",
+      "description": "confirmReset never signs the user out of existing sessions. R3/AC4 require this, and UserRepo.revokeSessions already exists for it.",
+      "location": "plan.md step 7; spec.md R3, AC4; fixture/src/db/userRepo.ts",
+      "expected_lenses": ["lens-spec-coverage"],
+      "severity": "major"
+    },
+    {
+      "id": "D7",
+      "description": "The test strategy has no test for token reuse (AC3) or session revocation (AC4), and expiry (AC2) is only simulated by a mocked null from consume. The AC5 limiter test runs on a single in-process instance, so it cannot show the cross-instance behaviour AC5 asks for.",
+      "location": "plan.md test strategy",
+      "expected_lenses": ["lens-tests"],
+      "severity": "major"
+    },
+    {
+      "id": "D8",
+      "description": "Step 9 adds a purge job for expired tokens, which no requirement asks for (minor scope creep).",
+      "location": "plan.md step 9",
+      "expected_lenses": ["lens-spec-coverage"],
+      "severity": "minor"
+    }
+  ],
+  "tensions": [
+    {
+      "id": "T1",
+      "lenses": ["lens-architecture", "lens-risk"],
+      "related_defects": ["D1", "D2"],
+      "description": "Architecture's natural fix is to reuse the existing rateLimit helper. That helper is also an in-process Map, so reusing it keeps the per-instance flaw risk is objecting to. Risk's natural fix is a shared store such as Redis, which the spec forbids this quarter. The conflict is only visible from the fixture's implementation and the multi-instance constraint.",
+      "lens_a_fix": "Drop resetLimiter.ts and use the existing rateLimit() helper, extended to allow a 'silent' mode that passes through with a flag instead of returning 429.",
+      "lens_b_fix": "Back the limiter with a shared store so that limits hold across instances and deploys.",
+      "reconciliation": "Enforce the per-email limit in Postgres, the shared store that is allowed, for example by counting password_reset tokens issued for the user in the last hour from one_time_tokens, inside the service. Keep the per-IP limit on the existing rateLimit helper as a best-effort guard, extended with a silent mode so it returns 202, and note that the per-IP limit is per instance.",
+      "subtle": true
+    },
+    {
+      "id": "T2",
+      "lenses": ["lens-architecture", "lens-consistency"],
+      "related_defects": ["D3", "D4"],
+      "description": "Architecture's natural fix is to reuse OneTimeTokenRepo with a new 'password_reset' purpose. But that repo hardcodes TOKEN_TTL_MS to 24 hours, so a plain reuse issues 24-hour tokens and breaks the 30-minute requirement that consistency is enforcing. Consistency's fix (a 30-minute TTL) only works in the plan's separate repo, which takes a ttl argument.",
+      "lens_a_fix": "Delete the new table and repo; call OneTimeTokenRepo.issue/consume/revokeAll with purpose 'password_reset'.",
+      "lens_b_fix": "Set the reset token TTL to 30 minutes as specified.",
+      "reconciliation": "Reuse OneTimeTokenRepo but extend it with a per-purpose or per-call TTL (keeping 24h for email verification), add 'password_reset' to TokenPurpose, and issue reset tokens with a 30-minute TTL. No new table is needed.",
+      "subtle": true
+    }
+  ]
+}

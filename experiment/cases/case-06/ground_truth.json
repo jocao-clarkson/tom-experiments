@@ -1,0 +1,78 @@
+{
+  "case_id": "case-06",
+  "type": "tension",
+  "domain": "api",
+  "defects": [
+    {
+      "id": "D1",
+      "description": "For amount sorts the plan switches to offset pagination with a separate 'next_page' field and '?page=' parameter. That contradicts R4 (the same opaque cursor model and {data, next_cursor} shape as /v1/customers) and AC2 (no skips or repeats; OFFSET paging skips and repeats rows when data changes between pages).",
+      "location": "plan.md overview, steps 3-4, 7; spec.md R4, AC2",
+      "expected_lenses": ["lens-consistency"],
+      "severity": "major"
+    },
+    {
+      "id": "D2",
+      "description": "Amount sorts have no supporting index: only (tenant_id, created_at, id) and (tenant_id, customer_id) exist. Ordering by amount_cents over up to 1M tenant rows with growing OFFSETs means sorts and scans that will miss the 250 ms p95. The plan waves this off with an unsupported assumption that result sets are small.",
+      "location": "plan.md step 3, rollout notes; spec.md non-functional constraints; fixture/migrations/003_invoices.sql",
+      "expected_lenses": ["lens-risk"],
+      "severity": "major"
+    },
+    {
+      "id": "D3",
+      "description": "Plan adds an invoices-only writeInvoiceError with its own envelope instead of using the shared writeError in respond.go. Every other endpoint uses writeError, and the SDKs parse its envelope generically.",
+      "location": "plan.md step 6; fixture/internal/httpapi/respond.go",
+      "expected_lenses": ["lens-architecture"],
+      "severity": "major"
+    },
+    {
+      "id": "D4",
+      "description": "The custom error uses code 'bad_request' and a 'field' key, but R5/AC3 require code 'invalid_parameter' and a 'param' key.",
+      "location": "plan.md step 6; spec.md R5, AC3",
+      "expected_lenses": ["lens-consistency"],
+      "severity": "major"
+    },
+    {
+      "id": "D5",
+      "description": "Malformed created_after/created_before values are silently skipped instead of returning 400 invalid_parameter. This contradicts R5 and AC3 and widens the result set without telling the caller.",
+      "location": "plan.md step 5; spec.md R5, AC3",
+      "expected_lenses": ["lens-consistency", "lens-spec-coverage"],
+      "severity": "major"
+    },
+    {
+      "id": "D6",
+      "description": "The tests have no AC2 multi-page traversal with ties, no AC3 malformed-timestamp test, no AC4 cross-tenant customer_id test, and no AC5 cursor/sort mismatch test. Store tests only assert generated SQL strings.",
+      "location": "plan.md test strategy",
+      "expected_lenses": ["lens-tests"],
+      "severity": "major"
+    },
+    {
+      "id": "D7",
+      "description": "Plan adds the third-party squirrel query builder, while the store package uses hand-written pgx SQL. The spec requires platform approval for new dependencies, and the plan defers that to the PR.",
+      "location": "plan.md step 1, rollout notes; fixture/internal/store/customers.go",
+      "expected_lenses": ["lens-architecture"],
+      "severity": "minor"
+    }
+  ],
+  "tensions": [
+    {
+      "id": "T1",
+      "lenses": ["lens-consistency", "lens-risk"],
+      "related_defects": ["D1", "D2"],
+      "description": "Consistency's natural fix is keyset cursor pagination for amount sorts too, encoding (amount_cents, id) in the cursor, to keep R4's single cursor model and AC2. Risk notes that neither offset nor keyset amount sorting can meet the 250 ms p95 at 1M rows without an (tenant_id, amount_cents, id) index, and the spec freezes new indexes this quarter. Doing what consistency asks satisfies the API contract but still breaches the NFR, and the fix risk would reach for (add the index) is forbidden.",
+      "lens_a_fix": "Replace the offset/page token with a keyset cursor that encodes the sort key, (amount_cents, id), plus the sort name, returned as next_cursor.",
+      "lens_b_fix": "Add a (tenant_id, amount_cents, id) index, or otherwise do not offer unindexed amount sorting on large tenants.",
+      "reconciliation": "Use a single keyset cursor that encodes sort name, sort key and id, which also satisfies AC5. Explicitly flag to the spec owner that amount sorts cannot meet the p95 under the index freeze. Options are to descope amount sorts until the repartitioning lands, allow them only alongside a selective filter such as customer_id, or accept a relaxed NFR for them.",
+      "subtle": false
+    },
+    {
+      "id": "T2",
+      "lenses": ["lens-architecture", "lens-consistency"],
+      "related_defects": ["D3", "D4"],
+      "description": "Architecture's natural fix is to delete writeInvoiceError and call the shared writeError. In the fixture, writeError(w, status, code, msg) and errorDetail have no place for 'param', so a plain reuse cannot produce the 'param' field consistency requires (R5/AC3). Consistency's fix (correct the code and field names) is easiest in the bespoke helper architecture wants removed. The conflict is in the shared helper's signature.",
+      "lens_a_fix": "Use the shared writeError for all invoice errors; no endpoint-specific envelope.",
+      "lens_b_fix": "Return code 'invalid_parameter' and a 'param' key exactly as R5/AC3 specify.",
+      "reconciliation": "Extend the shared envelope additively: add an optional Param string `json:\"param,omitempty\"` to errorDetail and a writeParamError(w, param, msg) wrapper in respond.go that emits code invalid_parameter. Existing endpoints are unchanged, invoices get the spec's shape, and customers can adopt it later.",
+      "subtle": true
+    }
+  ]
+}

@@ -1,0 +1,78 @@
+{
+  "case_id": "case-18",
+  "type": "tension",
+  "domain": "auth",
+  "defects": [
+    {
+      "id": "D1",
+      "description": "The new key's plaintext secret is stored in a pending_secret TEXT column, violating the NFR that plaintext secrets are never written to the database unencrypted.",
+      "location": "plan.md steps 1, 2, 5; spec.md non-functional constraints",
+      "expected_lenses": ["lens-risk"],
+      "severity": "blocker"
+    },
+    {
+      "id": "D2",
+      "description": "The secret endpoint returns pending_secret on every call until the hourly job clears it, so the secret can be fetched repeatedly and for up to ~70 minutes. R7/AC4 require one retrieval only, within 10 minutes, then 404.",
+      "location": "plan.md steps 2, 8; spec.md R7, AC4",
+      "expected_lenses": ["lens-consistency"],
+      "severity": "major"
+    },
+    {
+      "id": "D3",
+      "description": "Plan adds a new src/lib/parseHours.ts helper instead of using the existing intParam in src/lib/validate.ts that routes already use for integer body params.",
+      "location": "plan.md step 3; fixture/src/lib/validate.ts; fixture/src/routes/keys.ts",
+      "expected_lenses": ["lens-architecture"],
+      "severity": "minor"
+    },
+    {
+      "id": "D4",
+      "description": "grace_period_hours above 168 is capped, negatives become 0, and non-numeric values fall back to 24. Spec R3/AC2 require 400 (and no key created) for any value that is not an integer in 0-168.",
+      "location": "plan.md step 3; spec.md R3, AC2",
+      "expected_lenses": ["lens-consistency"],
+      "severity": "major"
+    },
+    {
+      "id": "D5",
+      "description": "Inline authorization allows any org_admin without comparing key.orgId to actor.orgId, so admins of other orgs can rotate keys (violates R4/AC5). It also duplicates KeyService.assertCanManage, which already does the correct check.",
+      "location": "plan.md step 4; fixture/src/keys/keyService.ts; spec.md R4, AC5",
+      "expected_lenses": ["lens-risk", "lens-architecture"],
+      "severity": "blocker"
+    },
+    {
+      "id": "D6",
+      "description": "Rotate checks status then creates the replacement and marks rotating as separate non-transactional steps, so concurrent rotate requests can both pass the status check and create two replacement keys (violates the concurrency NFR and R5).",
+      "location": "plan.md step 5; spec.md R5, non-functional constraints",
+      "expected_lenses": ["lens-risk"],
+      "severity": "major"
+    },
+    {
+      "id": "D7",
+      "description": "verify accepts any key with status 'rotating' without checking grace_ends_at; the old key keeps working until the hourly expireDue run, up to an hour past graceEndsAt, violating R2/AC1 and the one-minute NFR. AC1 is only checked by observing staging.",
+      "location": "plan.md steps 6 and test strategy; fixture/src/server.ts; spec.md R2, AC1",
+      "expected_lenses": ["lens-risk", "lens-tests"],
+      "severity": "major"
+    }
+  ],
+  "tensions": [
+    {
+      "id": "T1",
+      "lenses": ["lens-risk", "lens-consistency"],
+      "related_defects": ["D1", "D2"],
+      "description": "Risk's natural fix is to stop persisting the plaintext secret at all (drop pending_secret). That removes the only mechanism for R7's re-display. Consistency wants R7 implemented more strictly (once, within 10 minutes), which presupposes the secret is still retrievable server-side. The two fixes pull in opposite directions unless someone notices the NFR only forbids unencrypted storage and the fixture already has encrypt/decrypt.",
+      "lens_a_fix": "Remove the pending_secret column; never store the new secret anywhere after the response.",
+      "lens_b_fix": "Enforce R7 at read time: return the secret only once and only within 10 minutes of rotation.",
+      "reconciliation": "Store the new secret encrypted with lib/crypto encrypt() plus an expires_at of rotation + 10 minutes; on GET, atomically read-and-delete it (UPDATE ... SET pending_secret = NULL ... RETURNING) only when unexpired and the caller is the rotating actor, and clear expired values. This satisfies both the NFR and R7/AC4.",
+      "subtle": false
+    },
+    {
+      "id": "T2",
+      "lenses": ["lens-architecture", "lens-consistency"],
+      "related_defects": ["D3", "D4"],
+      "description": "Architecture's natural fix is to drop parseHours and reuse validate.intParam. But intParam is lenient by design: it clamps out-of-range values into [min, max] and returns the default for non-numeric input, exactly the behaviour consistency flags as contradicting R3 (400 on invalid). Reusing it as-is keeps the spec violation. Visible only in validate.ts.",
+      "lens_a_fix": "Replace parseHours with intParam(raw, { min: 0, max: 168, default: 24 }).",
+      "lens_b_fix": "Reject non-integer, negative, or >168 values with 400 before creating any key.",
+      "reconciliation": "Add a strict variant to validate.ts (e.g. intParam with a strict flag, or a strictIntParam that throws a 400 error) without changing intParam's lenient default for existing callers, and use it for grace_period_hours; test AC2.",
+      "subtle": true
+    }
+  ]
+}

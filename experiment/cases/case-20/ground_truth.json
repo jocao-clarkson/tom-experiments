@@ -1,0 +1,71 @@
+{
+  "case_id": "case-20",
+  "type": "tension",
+  "domain": "mobile-backend",
+  "defects": [
+    {
+      "id": "D1",
+      "description": "Plan trusts client_updated_at with no bound. The spec says device clocks can be hours or days off, so a copy stamped in the future wins forever and later legitimate edits from correct devices are reported as stale.",
+      "location": "plan.md step 4 and rollout notes; spec.md R3, non-functional constraints",
+      "expected_lenses": ["lens-risk"],
+      "severity": "major"
+    },
+    {
+      "id": "D2",
+      "description": "Equal client_updated_at timestamps keep the stored copy and report stale; spec R3/AC3 say the incoming copy wins and the result is updated.",
+      "location": "plan.md step 4; spec.md R3, AC3",
+      "expected_lenses": ["lens-consistency"],
+      "severity": "major"
+    },
+    {
+      "id": "D3",
+      "description": "Plan adds a new sync_notifier with its own httpx.AsyncClient posting to the push gateway, duplicating app/services/push.py (send_silent and the registered push.silent task) and bypassing the durable app/core/tasks queue.",
+      "location": "plan.md step 7; fixture/app/services/push.py; fixture/app/core/tasks.py",
+      "expected_lenses": ["lens-architecture"],
+      "severity": "major"
+    },
+    {
+      "id": "D4",
+      "description": "The push is fired with asyncio.create_task before commit: it can announce changes that are then rolled back, the task is lost on process restart or gateway outage (no retry), and client retries can trigger extra pushes. AC5 (exactly one push) is not guaranteed.",
+      "location": "plan.md step 7; spec.md R7, AC5, non-functional constraints",
+      "expected_lenses": ["lens-risk"],
+      "severity": "major"
+    },
+    {
+      "id": "D5",
+      "description": "R6 (changes since cursor, next_cursor) is deferred; the response omits changes and next_cursor that R4/R6 require.",
+      "location": "plan.md step 6; spec.md R4, R6",
+      "expected_lenses": ["lens-spec-coverage"],
+      "severity": "major"
+    },
+    {
+      "id": "D6",
+      "description": "No tests for AC4 (201 items -> 413), AC3 (tie -> updated), or AC5 (one push, none to the calling device).",
+      "location": "plan.md test strategy; spec.md AC3, AC4, AC5",
+      "expected_lenses": ["lens-tests"],
+      "severity": "minor"
+    }
+  ],
+  "tensions": [
+    {
+      "id": "T1",
+      "lenses": ["lens-risk", "lens-consistency"],
+      "related_defects": ["D1", "D2"],
+      "description": "Risk's natural fix for untrustworthy device clocks is to order writes by server receipt time instead of client_updated_at. Consistency insists on following R3 exactly (LWW on client_updated_at, incoming wins ties). Switching to server time directly contradicts the spec rule consistency is enforcing.",
+      "lens_a_fix": "Resolve conflicts by server receive time (or ignore client_updated_at) so skewed clocks cannot win.",
+      "lens_b_fix": "Implement R3 as written: compare client_updated_at, and let the incoming copy win on equal timestamps.",
+      "reconciliation": "Keep LWW on client_updated_at with incoming-wins ties per R3, but bound it: reject or clamp timestamps more than a small tolerance in the future relative to server time (e.g. treat them as now), record when clamping happens, and raise the clock-skew limitation with the spec owner rather than silently changing the rule.",
+      "subtle": false
+    },
+    {
+      "id": "T2",
+      "lenses": ["lens-architecture", "lens-risk"],
+      "related_defects": ["D3", "D4"],
+      "description": "Architecture's natural fix is to drop the bespoke notifier and follow the existing pattern in create_workout, which calls push.send_silent directly after commit. But send_silent is a blocking synchronous httpx call with a 10 s timeout and up to 3 attempts with sleeps; calling it inline in an async handler blocks the event loop and blows the 1.5 s p95, especially given the gateway's p99 and outages. Risk wants the push off the request path and durable. Visible only by reading push.py and tasks.py.",
+      "lens_a_fix": "Delete sync_notifier.py and call push.send_silent(user.id, ..., exclude_device=x_device_id) after commit, as create_workout does.",
+      "lens_b_fix": "Keep the push off the request path and make it reliable (retry, survive restarts, only after commit).",
+      "reconciliation": "Use the existing durable queue: tasks.enqueue(session, \"push.silent\", {...}) inside the same transaction as the workout writes (once per sync that changed data), so it commits atomically, the worker retries with backoff, and the existing push.py handler is reused. Since the idempotency replay returns early, retried requests do not enqueue again.",
+      "subtle": true
+    }
+  ]
+}

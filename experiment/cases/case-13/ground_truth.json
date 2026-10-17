@@ -1,0 +1,78 @@
+{
+  "case_id": "case-13",
+  "type": "tension",
+  "domain": "auth",
+  "defects": [
+    {
+      "id": "D1",
+      "description": "RevokeAllForUser SCANs every sess:* key and GETs each value to find a user's sessions. With ~4M live sessions this is O(total sessions) per reset (the NFR forbids it) and it is not atomic: a session created during the scan survives, weakening R4.",
+      "location": "plan.md step 7; fixture/internal/session/store.go; spec.md non-functional constraints",
+      "expected_lenses": ["lens-risk"],
+      "severity": "major"
+    },
+    {
+      "id": "D2",
+      "description": "Plan widens the shared session.Store interface with RevokeAllForUser, which breaks every implementation (including fakeStore in internal/httpx/middleware_test.go) and is not mentioned; it changes a shared contract for one feature.",
+      "location": "plan.md step 7; fixture/internal/session/store.go; fixture/internal/httpx/middleware_test.go",
+      "expected_lenses": ["lens-architecture"],
+      "severity": "major"
+    },
+    {
+      "id": "D3",
+      "description": "AC2 (token in email works once and expires after 30 minutes) is left to a manual staging check, and AC3 (old session gets 401 after reset) is only covered indirectly. No automated test of expiry or of end-to-end revocation.",
+      "location": "plan.md test strategy; spec.md AC2, AC3",
+      "expected_lenses": ["lens-tests"],
+      "severity": "major"
+    },
+    {
+      "id": "D4",
+      "description": "Plan builds a new reset Mailer with its own http.Client posting to MAIL_RELAY_URL instead of using the existing notify.Sender/notify.Queue (and relaySender) in the fixture.",
+      "location": "plan.md step 3; fixture/internal/notify/notify.go; fixture/cmd/authd/handlers.go",
+      "expected_lenses": ["lens-architecture"],
+      "severity": "major"
+    },
+    {
+      "id": "D5",
+      "description": "Request handler issues the token and sends mail synchronously before responding, but only for existing accounts. Response time then reveals whether an account exists, and mail is delivered on the request path, both forbidden by the NFRs.",
+      "location": "plan.md step 4; spec.md R1, non-functional constraints",
+      "expected_lenses": ["lens-risk", "lens-consistency"],
+      "severity": "major"
+    },
+    {
+      "id": "D6",
+      "description": "Reset tokens are issued with a 1 hour lifetime; spec R2 requires 30 minutes.",
+      "location": "plan.md step 2; spec.md R2",
+      "expected_lenses": ["lens-consistency"],
+      "severity": "major"
+    },
+    {
+      "id": "D7",
+      "description": "Per-IP limit uses httpx.RateLimit, which responds 429 when over the limit; R5 says over-limit requests must still return 202.",
+      "location": "plan.md step 5; fixture/internal/httpx/middleware.go; spec.md R5",
+      "expected_lenses": ["lens-consistency"],
+      "severity": "minor"
+    }
+  ],
+  "tensions": [
+    {
+      "id": "T1",
+      "lenses": ["lens-risk", "lens-architecture"],
+      "related_defects": ["D1", "D2"],
+      "description": "Risk's natural fix for the SCAN is a per-user session index (a user_sess:{id} set maintained on Create/Delete), which means changing RedisStore.Create, the login path and every Store implementation, i.e. an even wider change to shared session code. Architecture wants the opposite: avoid widening the shared Store contract and its blast radius. The way out depends on noticing that RequireAuth already loads the user on every request and that SetPassword already bumps password_changed_at while sessions carry IssuedAt.",
+      "lens_a_fix": "Replace SCAN with a per-user index of session IDs maintained on session create/delete, and delete via that index.",
+      "lens_b_fix": "Do not add a method to the shared session.Store interface; keep the change local to the reset feature.",
+      "reconciliation": "Revoke by timestamp: in RequireAuth reject sessions whose IssuedAt is before the user's PasswordChangedAt (already set by Repo.SetPassword and already loaded per request). That is O(1), immediate on all devices, needs no Store interface change or index, and gets a middleware unit test for AC3.",
+      "subtle": true
+    },
+    {
+      "id": "T2",
+      "lenses": ["lens-tests", "lens-architecture"],
+      "related_defects": ["D3", "D4"],
+      "description": "Tests wants automated coverage of AC2 through the mail path. Given the plan's bespoke Mailer that talks to the real relay, the natural fix is an end-to-end test against a relay (staging or a local stub). Architecture wants the bespoke Mailer removed in favour of notify.Sender. Writing integration tests that pin down the bespoke relay mailer, and also deleting it, cannot both be followed; an e2e against a real relay also breaks the no-network test rule.",
+      "lens_a_fix": "Add an automated end-to-end test that sends the reset email through the mailer to a relay and follows the link, including expiry.",
+      "lens_b_fix": "Delete internal/reset/mailer.go and send via the existing notify.Queue/notify.Sender.",
+      "reconciliation": "Send through notify.Sender (enqueued off the request path) and test AC2 in-process with notify.Recorder capturing the message, extracting the token from the link, and an injectable clock to check the 30-minute expiry. No network needed.",
+      "subtle": false
+    }
+  ]
+}

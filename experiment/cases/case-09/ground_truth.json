@@ -1,0 +1,85 @@
+{
+  "case_id": "case-09",
+  "type": "tension",
+  "domain": "cli",
+  "defects": [
+    {
+      "id": "D1",
+      "description": "Plan writes its own readline-based askYesNo() instead of using the existing lib/prompt.confirm through the injected deps.confirm that deploy uses. The prompt has to be module-mocked in tests instead of injected, and the codebase's prompt behaviour (including its non-TTY handling) is duplicated.",
+      "location": "plan.md step 3; fixture/src/lib/prompt.ts; fixture/src/commands/deploy.ts",
+      "expected_lenses": ["lens-architecture"],
+      "severity": "major"
+    },
+    {
+      "id": "D2",
+      "description": "askYesNo has no TTY check, so in CI (non-TTY stdin) it blocks waiting on stdin, or reads EOF as a decline. It never produces the required 'confirmation required; re-run with --yes' path, so R2/AC2 fail and a pipeline can hang.",
+      "location": "plan.md step 3; spec.md R2, AC2",
+      "expected_lenses": ["lens-risk"],
+      "severity": "major"
+    },
+    {
+      "id": "D3",
+      "description": "Declined or missing confirmation goes through handleAbort, which returns ExitCode.FAILURE (1). R2 and R5 require exit code 3. The plan justifies this as consistency with deploy, but the spec overrides it here.",
+      "location": "plan.md step 4; fixture/src/lib/output.ts handleAbort; spec.md R2, R5",
+      "expected_lenses": ["lens-consistency"],
+      "severity": "major"
+    },
+    {
+      "id": "D4",
+      "description": "The poll loop has no overall 10-minute deadline. TIMEOUT: 4 is added but nothing ever produces it, so R3's limit, R5's exit 4 and AC3 (message with the rollback id) are not implemented, and the command can hang indefinitely.",
+      "location": "plan.md steps 6-7; spec.md R3, R5, AC3",
+      "expected_lenses": ["lens-spec-coverage", "lens-risk"],
+      "severity": "major"
+    },
+    {
+      "id": "D5",
+      "description": "Transient poll errors are delegated to ApiClient's GET retries, which give up after about 6 s and throw. The plan then exits 1 ('API error') while the rollback continues server-side. That contradicts AC6 and misreports the outcome.",
+      "location": "plan.md step 6; fixture/src/lib/apiClient.ts RETRY_DELAYS_MS; spec.md AC6",
+      "expected_lenses": ["lens-risk"],
+      "severity": "major"
+    },
+    {
+      "id": "D6",
+      "description": "R6/AC5 (a global --token option overriding the configured token) is deliberately dropped in step 10 without the spec's agreement.",
+      "location": "plan.md step 10; spec.md R6, AC5",
+      "expected_lenses": ["lens-spec-coverage"],
+      "severity": "major"
+    },
+    {
+      "id": "D7",
+      "description": "Verbose diagnostics interpolate raw argv and JSON.stringify(loadConfig()), which includes the token, into the debug message string. log.ts only redacts named fields, so the token is printed to CI logs, violating the 'tokens never printed, including --verbose' constraint.",
+      "location": "plan.md step 9; fixture/src/lib/log.ts",
+      "expected_lenses": ["lens-risk"],
+      "severity": "blocker"
+    },
+    {
+      "id": "D8",
+      "description": "There are no tests for AC2 (non-TTY gives exit 3 and no POST), AC3 (timeout gives exit 4 with id), AC5 (--token override) or AC6 (transient poll errors). The declined-prompt exit code is never asserted.",
+      "location": "plan.md test strategy",
+      "expected_lenses": ["lens-tests"],
+      "severity": "major"
+    }
+  ],
+  "tensions": [
+    {
+      "id": "T1",
+      "lenses": ["lens-architecture", "lens-consistency"],
+      "related_defects": ["D1", "D3"],
+      "description": "Architecture's natural fix is to follow deploy exactly: use deps.confirm and handleAbort. In the fixture, handleAbort hardcodes ExitCode.FAILURE (1), and confirm() returns false on a non-TTY without saying why. A faithful reuse therefore keeps exit 1 and cannot tell 'declined' from 'not interactive', so the R2 message is lost. Consistency's fix (exit 3, distinct message) means not reusing those helpers as they are. Changing handleAbort globally would alter deploy's exit code, which is out of scope.",
+      "lens_a_fix": "Replace askYesNo with deps.confirm and reuse handleAbort, mirroring deploy.ts.",
+      "lens_b_fix": "Exit with code 3 on decline or missing confirmation, and print 'confirmation required; re-run with --yes' when stdin is not interactive.",
+      "reconciliation": "Reuse deps.confirm for the prompt, but check stdin.isTTY in the command first to emit the R2 message. Add ExitCode.ABORTED = 3 and have handleAbort take an optional exit code (default FAILURE), so that deploy's behaviour is unchanged and rollback passes ABORTED.",
+      "subtle": true
+    },
+    {
+      "id": "T2",
+      "lenses": ["lens-spec-coverage", "lens-risk"],
+      "related_defects": ["D6", "D7"],
+      "description": "Coverage's fix is to add the required global --token flag. Risk sees that tokens on the command line are exposed in process listings and shell history, and with the plan's verbose argv/config echo they would be printed straight into CI logs. Risk would naturally push to keep tokens env-only, which removes the flag coverage is insisting on.",
+      "lens_a_fix": "Add a global --token <token> option in cli.ts that overrides loadConfig's token for the invocation.",
+      "lens_b_fix": "Do not accept tokens via argv; keep DEPLOYER_TOKEN as the only CI path, and stop echoing argv/config in verbose output.",
+      "reconciliation": "Implement --token as the spec requires, but never echo raw argv or config. Route verbose output through debug() fields so the token key is redacted, document env vars as the preferred CI mechanism, and raise the process-list exposure with the spec owner, for example suggesting --token-file or stdin as a follow-up.",
+      "subtle": false
+    }
+  ]
+}
