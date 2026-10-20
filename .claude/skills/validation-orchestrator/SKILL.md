@@ -64,10 +64,9 @@ If the arguments don't include `technique`, skip this subsection. Everything els
 If `technique` is set, the phase must be `plan`. If it isn't, stop and say that techniques are plan-phase only. Then do the following:
 
 - `technique=none`: run step 2 exactly as above (one round).
-- `technique=second-round`, `technique=debate`, or `technique=ptu`: read `techniques/<technique>.md` in this skill's directory and follow it. It replaces step 2 with two lens rounds. Steps 3 to 5 then use **only the round-2 findings**.
-- For any technique, also read `techniques/raw-output.md` and write the raw file it describes before step 3.
+- `technique=second-round`, `technique=debate`, or `technique=ptu`: read `techniques/<technique>.md` in this skill's directory and follow it. It replaces step 2 with two lens rounds.
 
-Steps 3, 4, and 5 are the same for every technique.
+Once the last lens round is done, stop. Skip steps 3 to 5: don't verify, merge, or judge the findings, and don't write a report. The experiment scores the lens outputs directly from the transcript. End with the single line `Lens rounds complete.`
 
 ## 3. Verify and merge
 

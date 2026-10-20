@@ -55,4 +55,4 @@ Write `DEBATE: none` if nothing of yours conflicts and you disagree with no peer
 
 Paste the round-1 outputs exactly as the lenses returned them. Don't summarize or reorder them, and use the same lens order for every lens.
 
-The round-2 FINDINGS are the final findings that steps 3 to 5 use. The DEBATE block goes in the raw file only.
+The round-2 FINDINGS are the final findings.

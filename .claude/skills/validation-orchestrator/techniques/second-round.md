@@ -40,4 +40,4 @@ Return findings in the standard lens format.
 
 Paste the round-1 outputs exactly as the lenses returned them. Don't summarize or reorder them, and use the same lens order for every lens.
 
-The round-2 outputs are the final findings that steps 3 to 5 use.
+The round-2 outputs are the final findings.

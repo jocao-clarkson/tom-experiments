@@ -74,4 +74,4 @@ SURPRISE RESPONSES:
 
 Paste the round-1 outputs exactly as the lenses returned them, PREDICTIONS blocks included. Don't summarize or reorder them, and use the same lens order for every lens. If a lens has no surprises, write `YOUR SURPRISES: none` and `SURPRISE RESPONSES: none`.
 
-The round-2 FINDINGS are the final findings that steps 3 to 5 use. Predictions, surprises, and surprise responses go in the raw file only.
+The round-2 FINDINGS are the final findings.

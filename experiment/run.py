@@ -17,13 +17,13 @@ re-run, so an interrupted batch can resume.
 import argparse
 import concurrent.futures
 import datetime
-import difflib
 import hashlib
 import json
 import os
 import random
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -49,8 +49,6 @@ LENS_CALLS = {t: 5 * n for t, n in ROUNDS.items()}
 
 SPEC_REL = "specs/feature/spec.md"
 PLAN_REL = "specs/feature/plan.md"
-REPORT_REL = "specs/feature/validation-plan.md"
-RAW_REL = "specs/feature/validation-plan.raw.json"
 ORCHESTRATOR_TOOLS = "Skill,Agent,Read,Grep,Glob,Bash,Write"
 STOP_AFTER_FAILURES = 3
 
@@ -157,10 +155,19 @@ def usage_summary(result):
 # Lens outputs from the transcript
 
 
+ASYNC_LAUNCH = "Async agent launched"
+
+
 def extract_lens_outputs(stdout):
-    """Pull every top-level Agent call and its verbatim result out of stream-json."""
+    """Pull every top-level Agent call and its verbatim result out of stream-json.
+
+    Lenses usually run as background agents: the Agent tool_result is only a
+    launch notice, and the lens's final text arrives later in a system
+    task_notification event (its `summary`) with the same tool_use_id.
+    """
     calls = {}
     order = []
+    notifications = {}
     for line in stdout.splitlines():
         line = line.strip()
         if not line.startswith("{"):
@@ -171,6 +178,9 @@ def extract_lens_outputs(stdout):
             continue
         if not isinstance(ev, dict) or ev.get("parent_tool_use_id"):
             continue  # events from inside a subagent
+        if ev.get("type") == "system" and ev.get("subtype") == "task_notification":
+            notifications[ev.get("tool_use_id")] = ev
+            continue
         content = (ev.get("message") or {}).get("content")
         if not isinstance(content, list):
             continue
@@ -195,6 +205,13 @@ def extract_lens_outputs(stdout):
                     call["output"] = tool_result_text(item.get("content"))
                     call["is_error"] = bool(item.get("is_error"))
 
+    for cid, call in calls.items():
+        if call["output"] is not None and call["output"].startswith(ASYNC_LAUNCH):
+            note = notifications.get(cid)
+            call["background"] = True
+            call["status"] = note.get("status") if note else None
+            call["output"] = note.get("summary") if note and note.get("status") == "completed" else None
+
     rounds = {}
     problems = []
     for cid in order:
@@ -207,9 +224,10 @@ def extract_lens_outputs(stdout):
         slot = rounds.setdefault(str(call["round"]), {})
         if call["lens"] in slot:
             problems.append(f"lens {call['lens']} called twice in round {call['round']}; kept last")
-        if call["output"] is None:
+        if not call["output"]:
             problems.append(f"no result for {call['lens']} round {call['round']}")
-        slot[call["lens"]] = call["output"] or ""
+            continue  # leaves the slot empty, so the run is not complete
+        slot[call["lens"]] = call["output"]
     return {
         "source": "transcript",
         "rounds": rounds,
@@ -233,30 +251,6 @@ def complete(rounds, technique):
     return all(
         set(LENSES) <= set(rounds.get(str(r), {})) for r in range(1, want + 1)
     )
-
-
-def compare_with_raw(transcript_rounds, raw):
-    """How closely the orchestrator-written raw.json matches the transcript."""
-    if not raw:
-        return {"raw_present": False}
-    raw_rounds = raw.get("rounds") or {}
-    ratios = {}
-    missing = []
-    for rnd, lenses in transcript_rounds.items():
-        for lens, text in lenses.items():
-            other = (raw_rounds.get(rnd) or {}).get(lens)
-            if other is None:
-                missing.append(f"{rnd}/{lens}")
-                continue
-            a = " ".join(text.split())
-            b = " ".join(str(other).split())
-            ratios[f"{rnd}/{lens}"] = round(difflib.SequenceMatcher(None, a, b).ratio(), 3)
-    return {
-        "raw_present": True,
-        "missing_in_raw": missing,
-        "min_similarity": min(ratios.values()) if ratios else None,
-        "similarity": ratios,
-    }
 
 
 # --------------------------------------------------------------------------
@@ -353,6 +347,21 @@ def prepare_workdir(case):
     return work
 
 
+def remove_tree(path):
+    """rmtree that also removes read-only files (git objects on Windows)."""
+    def make_writable_and_retry(func, p, _):
+        os.chmod(p, stat.S_IWRITE)
+        func(p)
+
+    try:
+        if sys.version_info >= (3, 12):
+            shutil.rmtree(path, onexc=make_writable_and_retry)
+        else:
+            shutil.rmtree(path, onerror=make_writable_and_retry)
+    except OSError:
+        pass  # a leftover temp folder is not worth failing a run over
+
+
 def run_one(run_id, case, technique, rep, args):
     out = run_dir(run_id, case, technique, rep)
     out.mkdir(parents=True, exist_ok=True)
@@ -376,32 +385,11 @@ def run_one(run_id, case, technique, rep, args):
     (out / "transcript.jsonl").write_text(stdout, encoding="utf-8")
     if stderr.strip():
         (out / "stderr.txt").write_text(stderr, encoding="utf-8")
-    report = work / REPORT_REL
-    raw_path = work / RAW_REL
-    if report.exists():
-        shutil.copy2(report, out / "report.md")
-    raw = None
-    if raw_path.exists():
-        shutil.copy2(raw_path, out / "raw.json")
-        try:
-            raw = json.loads(raw_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            raw = None
-
     lens = extract_lens_outputs(stdout)
     lens["complete"] = complete(lens["rounds"], technique)
-    lens["raw_check"] = compare_with_raw(lens["rounds"], raw)
     (out / "lens_outputs.json").write_text(json.dumps(lens, indent=2), encoding="utf-8")
 
     result = result_event(stdout)
-    verdict = None
-    if report.exists():
-        m = re.search(
-            r"\*\*Verdict:\*\*\s*(PASS_WITH_NOTES|PASS|FAIL)",
-            report.read_text(encoding="utf-8", errors="replace"),
-        )
-        verdict = m.group(1) if m else None
-
     reason = None
     if timed_out:
         reason = "timeout"
@@ -411,8 +399,8 @@ def run_one(run_id, case, technique, rep, args):
         reason = "no result event"
     elif result.get("is_error"):
         reason = f"result error: {result.get('subtype')}"
-    elif not report.exists():
-        reason = "no report written"
+    elif not lens["complete"]:
+        reason = "lens outputs incomplete"
     text = ((result or {}).get("result") or "") + stderr
     if reason and re.search(r"usage limit|rate limit|limit reached|quota", text, re.I):
         reason += " (looks like a usage limit)"
@@ -428,7 +416,6 @@ def run_one(run_id, case, technique, rep, args):
         "started_at": started,
         "finished_at": now(),
         "wall_seconds": round(wall, 1),
-        "verdict": verdict,
         "usage": usage_summary(result),
         "num_turns": (result or {}).get("num_turns"),
         "duration_ms": (result or {}).get("duration_ms"),
@@ -443,7 +430,7 @@ def run_one(run_id, case, technique, rep, args):
     if not reason:
         (out / "done.json").write_text(json.dumps({"finished_at": meta["finished_at"]}), encoding="utf-8")
     if not args.keep_tmp:
-        shutil.rmtree(work, ignore_errors=True)
+        remove_tree(work)
     return meta
 
 
@@ -495,7 +482,7 @@ def main(argv=None):
             n = state["ok"] + state["failed"] + 1
             tag = "ok" if meta["status"] == "ok" else f"FAILED ({meta['reason']})"
             print(f"[{n}/{len(todo)}] {task[0]} {task[1]} rep{task[2]}: {tag} "
-                  f"{meta['wall_seconds']}s verdict={meta['verdict']}", flush=True)
+                  f"{meta['wall_seconds']}s", flush=True)
             if meta["status"] == "ok":
                 state["ok"] += 1
                 state["failures_in_a_row"] = 0
@@ -644,19 +631,9 @@ def fake_orchestrator(prompt):
         round_of(2, r2)
         rounds["2"] = r2
 
-    out_dir = Path(params.get("spec", SPEC_REL)).parent
-    out_dir.mkdir(parents=True, exist_ok=True)
-    raw = {"technique": technique, "phase": "plan", "spec": params.get("spec"), "plan": params.get("plan"),
-           "rounds": rounds}
-    if technique == "ptu":
-        raw["surprises"] = {lens: "- S1 (unpredicted): mock" for lens in LENSES}
-    (out_dir / "validation-plan.raw.json").write_text(json.dumps(raw, indent=2), encoding="utf-8")
-    verdict = rng.choice(["FAIL", "PASS_WITH_NOTES", "PASS"])
-    (out_dir / "validation-plan.md").write_text(
-        f"# Validation: mock — plan\n\n**Verdict:** {verdict}\n", encoding="utf-8")
     n_calls = 5 * len(rounds)
     emit({"type": "result", "subtype": "success", "is_error": False, "num_turns": 4 + n_calls,
-          "duration_ms": 1000 * n_calls, "result": f"Verdict: {verdict}",
+          "duration_ms": 1000 * n_calls, "result": "Lens rounds complete.",
           "usage": {"input_tokens": 2000, "output_tokens": 800,
                     "cache_creation_input_tokens": 0, "cache_read_input_tokens": 5000},
           "modelUsage": {"mock-orchestrator": {"inputTokens": 2000, "outputTokens": 800,

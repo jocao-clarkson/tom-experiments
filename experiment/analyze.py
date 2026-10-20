@@ -58,7 +58,6 @@ SUMMARY_METRICS = [
     "judge_tokens",
     "wall_seconds",
 ]
-VERDICTS = ["FAIL", "PASS_WITH_NOTES", "PASS"]
 BOOTSTRAP = 10000
 PERMUTATIONS = 20000
 
@@ -109,7 +108,6 @@ def run_metrics(rdir):
         "rep": meta["rep"],
         "case_type": judged.get("case_type"),
         "lens_source": judged.get("lens_source"),
-        "verdict": meta.get("verdict"),
         "n_findings": len(refs),
         "contradictions": len(pairs),
         "tensions_total": len(tension_ids),
@@ -283,9 +281,6 @@ def cmd_summary(args):
         }
         for m in SUMMARY_METRICS:
             s[m] = mean(r[m] for r in tr)
-        for v in VERDICTS:
-            s[f"verdict_{v}"] = sum(1 for r in tr if r["verdict"] == v)
-        s["verdict_missing"] = sum(1 for r in tr if r["verdict"] not in VERDICTS)
         summary.append(s)
     write_csv(out / "summary.csv", summary)
     write_csv(out / "comparisons.csv", comparisons(rows),

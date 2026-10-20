@@ -19,7 +19,6 @@ import concurrent.futures
 import datetime
 import json
 import re
-import shutil
 import sys
 import tempfile
 import threading
@@ -92,17 +91,12 @@ def parse_findings(text):
 
 
 def load_rounds(rdir, technique):
-    """Lens outputs per round: the transcript copy when complete, else raw.json."""
+    """Lens outputs per round, as extracted from the transcript, if complete."""
     lens_path = rdir / "lens_outputs.json"
     if lens_path.exists():
         lens = json.loads(lens_path.read_text(encoding="utf-8"))
         if runner.complete(lens.get("rounds", {}), technique):
             return lens["rounds"], "transcript"
-    raw_path = rdir / "raw.json"
-    if raw_path.exists():
-        raw = json.loads(raw_path.read_text(encoding="utf-8"))
-        if runner.complete(raw.get("rounds", {}), technique):
-            return raw["rounds"], "raw.json"
     return None, None
 
 
@@ -191,7 +185,7 @@ def call_judge(task, data, args):
             }
         raise RuntimeError(last_error)
     finally:
-        shutil.rmtree(cwd, ignore_errors=True)
+        runner.remove_tree(cwd)
 
 
 # --------------------------------------------------------------------------
@@ -203,7 +197,7 @@ def judge_run(rdir, args):
     technique = meta["technique"]
     rounds, source = load_rounds(rdir, technique)
     if rounds is None:
-        raise RuntimeError("lens outputs incomplete in both transcript and raw.json")
+        raise RuntimeError("lens outputs incomplete in the transcript")
     gt = json.loads((CASES / meta["case"] / "ground_truth.json").read_text(encoding="utf-8"))
     inputs = build_inputs(rounds, gt, technique)
     outputs = {task: call_judge(task, data, args) for task, data in inputs.items()}
