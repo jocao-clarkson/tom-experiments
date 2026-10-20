@@ -156,6 +156,25 @@ def usage_summary(result):
 
 
 ASYNC_LAUNCH = "Async agent launched"
+HANDBACK = "[Subagent hand-back]"
+
+
+def unwrap_handback(text):
+    """A foreground Agent result frames the lens's report: a notice line, the
+    report indented two spaces, then agentId/<usage> lines at column zero.
+    Return the report as the lens wrote it."""
+    if not text.startswith(HANDBACK):
+        return text
+    body = text.split("\n", 1)[1] if "\n" in text else ""
+    report = []
+    for line in body.split("\n"):
+        if line.startswith("  "):
+            report.append(line[2:])
+        elif line == "":
+            report.append("")
+        else:
+            break  # first column-zero line is the harness trailer
+    return "\n".join(report).strip("\n")
 
 
 def extract_lens_outputs(stdout):
@@ -202,7 +221,7 @@ def extract_lens_outputs(stdout):
             elif ev.get("type") == "user" and item.get("type") == "tool_result":
                 call = calls.get(item.get("tool_use_id"))
                 if call is not None:
-                    call["output"] = tool_result_text(item.get("content"))
+                    call["output"] = unwrap_handback(tool_result_text(item.get("content")))
                     call["is_error"] = bool(item.get("is_error"))
 
     for cid, call in calls.items():
