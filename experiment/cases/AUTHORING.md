@@ -55,6 +55,19 @@ A tension is a pair of lenses whose **natural fixes conflict**. If both lenses f
 
 Some tensions must be **subtle**. In those, the conflict only shows up once you look at the fixture code, or the two fixes conflict on a detail (an ordering, a default, a limit), not head-on.
 
+## Difficulty
+
+In the pilot, a single round of the five lenses found every seeded defect and reconciled every tension, so the cases couldn't separate the techniques. One lens could usually see both sides of a tension and propose the reconciliation itself. For example, the existing client the architecture lens told the plan to reuse also had the per-call `retries=0` override that settled the risk lens's concern. Tension cases must follow these rules:
+
+- **Split the evidence.** For each tension, put the fact behind side A and the fact behind side B in different places, each in its own lens's area. For example, side A rests on a spec non-functional constraint, and side B rests on a fixture detail two files away from the code the plan changes, such as a default in a helper, a side effect in a shared module, or a CI setting. No single file, spec section, or plan step should show both.
+- **Each side's obvious fix must look complete.** To the lens that raises it, its natural fix should look correct and finished. The conflict only shows up when the two fixes are put together.
+- **The reconciliation must need the other side's fact.** It must not be a one-parameter tweak sitting right next to the problem, like an override on the same function. Prefer reconciliations that a lens can only reach by using a fact from the other lens's area: an ordering, a limit, a default, a flag, or a narrower scope.
+- **Don't hint at the conflict.** No plan sentence should mention both concerns, and no spec line should foreshadow the clash.
+- **Make most defects subtle.** At least half the defects should be detectable only by checking a detail of the plan against the fixture or spec: a numeric limit, an ordering, a default, an error code, a field name, a timeout unit. Use at most two head-on defects, such as a missing requirement.
+- **Don't telegraph defects.** Avoid plan phrasing that invites scrutiny ("for simplicity", "we assume", "temporarily"). Write the plan with the same confidence everywhere.
+
+Target, checked with a `none`-only pilot: one round should miss or leave unreconciled a real share. Aim for `none` recall of about 0.6 to 0.85, and at most half of tensions reconciled.
+
 ## ground_truth.json
 
 ```json

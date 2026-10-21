@@ -1,7 +1,7 @@
 ---
 name: validation-orchestrator
 description: Validation gate for spec-driven development. Use after a plan is written (before implementation) to validate the plan against the spec, and again after implementation to validate the code against the spec and plan. Fans out parallel lens subagents (coverage, consistency, architecture, risk, tests), verifies and merges their findings, and returns a PASS / PASS_WITH_NOTES / FAIL verdict.
-argument-hint: "[phase=plan|implementation] [spec=<path>] [plan=<path>] [base=<ref>] [technique=none|second-round|debate|ptu]"
+argument-hint: "[phase=plan|implementation] [spec=<path>] [plan=<path>] [base=<ref>] [technique=baseline|second-round|debate|ptu]"
 allowed-tools: Agent, Read, Grep, Glob, Bash, Write
 ---
 
@@ -63,7 +63,7 @@ If the arguments don't include `technique`, skip this subsection. Everything els
 
 If `technique` is set, the phase must be `plan`. If it isn't, stop and say that techniques are plan-phase only. Then do the following:
 
-- `technique=none`: run step 2 exactly as above (one round).
+- `technique=baseline`: run step 2 exactly as above (one round).
 - `technique=second-round`, `technique=debate`, or `technique=ptu`: read `techniques/<technique>.md` in this skill's directory and follow it. It replaces step 2 with two lens rounds. Between rounds you write the round-1 outputs to `round1-findings.md` next to the spec. That file and the validation report are the only files you may write.
 
 Two optional arguments split the rounds across sessions:

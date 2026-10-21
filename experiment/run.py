@@ -12,7 +12,7 @@ re-run, so an interrupted batch can resume.
 
 Two-round techniques run round 2 as its own session, started from a finished
 round 1 written into the workspace (round1=...). second-round and debate reuse
-the `none` run's round 1; PTU's predicting round 1 runs in ptu/rep<k>/round1/.
+the `baseline` run's round 1; PTU's predicting round 1 runs in ptu/rep<k>/round1/.
 A failed round 2 is retried without redoing round 1. --single-session runs
 both rounds in one session instead.
 
@@ -42,7 +42,7 @@ REPO = EXP.parent
 CASES = EXP / "cases"
 RESULTS = EXP / "results"
 
-TECHNIQUES = ["none", "second-round", "debate", "ptu"]
+TECHNIQUES = ["baseline", "second-round", "debate", "ptu"]
 LENSES = [
     "lens-spec-coverage",
     "lens-consistency",
@@ -50,7 +50,7 @@ LENSES = [
     "lens-risk",
     "lens-tests",
 ]
-ROUNDS = {"none": 1, "second-round": 2, "debate": 2, "ptu": 2}
+ROUNDS = {"baseline": 1, "second-round": 2, "debate": 2, "ptu": 2}
 LENS_CALLS = {t: 5 * n for t, n in ROUNDS.items()}
 
 SPEC_REL = "specs/feature/spec.md"
@@ -63,9 +63,9 @@ EFFORTS = ["low", "medium", "high", "xhigh", "max"]
 
 # Unless --single-session, a two-round technique's round 2 is its own session
 # that starts from a finished round 1 (its "base"). second-round and debate
-# share the standard round 1, which is the `none` run itself; PTU's round 1
+# share the standard round 1, which is the `baseline` run itself; PTU's round 1
 # asks for predictions, so it runs alone in ptu/rep<k>/round1/.
-ROUND1_BASE = {"second-round": "none", "debate": "none", "ptu": "ptu"}
+ROUND1_BASE = {"second-round": "baseline", "debate": "baseline", "ptu": "ptu"}
 
 
 # --------------------------------------------------------------------------
@@ -367,6 +367,15 @@ def select_cases(spec):
     return chosen
 
 
+def case_hash(case):
+    """Hash of every file in the case folder, so runs on different versions
+    of a case can be told apart."""
+    h = hashlib.sha256()
+    for f in sorted(p for p in (CASES / case).rglob("*") if p.is_file()):
+        h.update(f.relative_to(CASES / case).as_posix().encode() + b"\0" + f.read_bytes())
+    return h.hexdigest()[:16]
+
+
 def run_dir(run_id, case, technique, rep):
     return RESULTS / run_id / "runs" / case / technique / f"rep{rep}"
 
@@ -506,6 +515,9 @@ def run_one(run_id, case, technique, rep, args, stage="full"):
     if stage == "round1":
         out = out / "round1"
     out.mkdir(parents=True, exist_ok=True)
+    # The judge scores against this copy, not the live case, which may be
+    # revised later. It stays out of the lenses' workspace.
+    shutil.copy2(CASES / case / "ground_truth.json", out / "ground_truth.json")
     work = prepare_workdir(case)
     prompt = (
         f"/validation-orchestrator phase=plan spec={SPEC_REL} "
@@ -571,6 +583,7 @@ def run_one(run_id, case, technique, rep, args, stage="full"):
         "technique": technique,
         "rep": rep,
         "stage": stage,
+        "case_hash": case_hash(case),
         "status": "failed" if reason else "ok",
         "reason": reason,
         "resets_at": resets_at,
@@ -661,7 +674,7 @@ def run_batch(args, tasks):
         return (c, b, r, "round1" if b == t else "full")
 
     # Sessions still to run: a round-2 session also needs its base, and
-    # second-round and debate share one (the `none` run).
+    # second-round and debate share one (the `baseline` run).
     sessions = set()
     for c, t, r in todo:
         if split(t):
@@ -716,7 +729,7 @@ def run_batch(args, tasks):
         if args.single_session:
             session(c, t, r, "full")
             return
-        # `none` is also the shared base, so it takes the same lock as the
+        # `baseline` is also the shared base, so it takes the same lock as the
         # round-2 sessions waiting on it.
         key = base_session(c, t, r) if split(t) else (c, t, r, "full")
         bdir = base_dir(args.run_id, c, t, r) if split(t) else run_dir(args.run_id, c, t, r)
@@ -807,7 +820,7 @@ def lens_text(lens, findings, extra=""):
 
 def fake_orchestrator(prompt):
     params = dict(re.findall(r"(\w+)=(\S+)", prompt))
-    technique = params.get("technique", "none")
+    technique = params.get("technique", "baseline")
     given_round1 = "round1" in params and Path(params["round1"]).exists()
     stop_after_round1 = params.get("stop") == "round1"
     plan = Path(params.get("plan", PLAN_REL))

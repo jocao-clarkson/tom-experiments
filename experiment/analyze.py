@@ -29,9 +29,9 @@ COMPARISONS = [
     ("ptu", "debate"),
     ("ptu", "second-round"),
     ("debate", "second-round"),
-    ("second-round", "none"),
-    ("debate", "none"),
-    ("ptu", "none"),
+    ("second-round", "baseline"),
+    ("debate", "baseline"),
+    ("ptu", "baseline"),
 ]
 COMPARE_METRICS = [
     "contradictions",
@@ -226,7 +226,7 @@ def comparisons(rows):
     out = []
     for a, b in COMPARISONS:
         for metric in COMPARE_METRICS:
-            if metric == "flip_rate" and "none" in (a, b):
+            if metric == "flip_rate" and "baseline" in (a, b):
                 continue  # one-round control has no round 2
             ma, mb = case_means(rows, a, metric), case_means(rows, b, metric)
             cases = sorted(set(ma) & set(mb))

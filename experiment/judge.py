@@ -208,9 +208,20 @@ def judge_run(rdir, args):
     rounds, source = load_rounds(rdir, technique)
     if rounds is None:
         raise RuntimeError("lens outputs incomplete in the transcript")
-    gt = json.loads((CASES / meta["case"] / "ground_truth.json").read_text(encoding="utf-8"))
+    # The ground truth the run was made against; older runs have no copy.
+    gt_path = rdir / "ground_truth.json"
+    if not gt_path.exists():
+        gt_path = CASES / meta["case"] / "ground_truth.json"
+    gt = json.loads(gt_path.read_text(encoding="utf-8"))
     inputs = build_inputs(rounds, gt, technique)
-    outputs = {task: call_judge(task, data, args) for task, data in inputs.items()}
+    # With --tasks, keep the other tasks' answers from the existing judge.json.
+    old = {}
+    if args.tasks and (rdir / "judge.json").exists():
+        old = json.loads((rdir / "judge.json").read_text(encoding="utf-8"))["outputs"]
+    outputs = {
+        task: old[task] if task in old and task not in args.tasks else call_judge(task, data, args)
+        for task, data in inputs.items()
+    }
     record = {
         "run": {k: meta[k] for k in ("run_id", "case", "technique", "rep")},
         "case_type": gt.get("type"),
@@ -233,10 +244,14 @@ def main(argv=None):
     p.add_argument("--model", default="sonnet")
     p.add_argument("--mock", action="store_true", help="fake claude -p; spends no usage")
     p.add_argument("--rejudge", action="store_true", help="judge again even if judge.json exists")
+    p.add_argument("--tasks", type=lambda s: [t.strip() for t in s.split(",") if t.strip()], default=None,
+                   help="with --rejudge, rerun only these tasks (comma list of final, flips, predictions)")
     p.add_argument("--timeout", type=int, default=900)
     p.add_argument("--wait-for-reset", type=float, nargs="?", const=24, default=None, metavar="HOURS",
                    help="after a usage limit, wait for it to reset and resume; give up after HOURS (default 24)")
     args = p.parse_args(argv)
+    if args.tasks and (not args.rejudge or set(args.tasks) - set(REQUIRED)):
+        sys.exit("--tasks needs --rejudge and names from: " + ", ".join(REQUIRED))
 
     root = RESULTS / args.run_id / "runs"
     if not root.exists():

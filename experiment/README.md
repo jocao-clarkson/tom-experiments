@@ -4,7 +4,7 @@
 
 | Technique | Arm | Lens rounds | What round 2 adds |
 | --- | --- | --- | --- |
-| `none` | C0 (control) | 1 | nothing; today's gate |
+| `baseline` | C0 (control) | 1 | nothing; today's gate |
 | `second-round` | C1 (control) | 2 | every lens sees all round-1 findings and re-reviews |
 | `debate` | D | 2 | defend or concede own conflicting findings, rebut peers |
 | `ptu` | PTU | 2 | round 1 also predicts peers; round 2 responds to its surprises |
@@ -15,7 +15,7 @@ Each run is a fresh headless `claude -p` session in a fresh temp folder, so no c
 
 With `technique=` set, the orchestrator stops after the last lens round. It doesn't verify, merge, or write a report, because the judge scores the lens outputs directly from the transcript. A run counts as done when every expected lens output was captured.
 
-**Shared round 1.** For each two-round technique, round 2 runs as its own session, which starts from a finished round 1. `run.py` writes that round 1 into the workspace as `specs/feature/round1-findings.md`, copied from the earlier transcript, plus `round1-briefs.md` with each lens's round-1 brief, and passes `round1=` to the skill. `second-round` and `debate` both start from the `none` run's round 1, because all three use the same standard round-1 brief. PTU's round 1 asks for predictions, so it runs on its own (`stop=round1`) in `ptu/rep<k>/round1/`. This saves two of the three standard round-1 fan-outs per case. It also makes the comparison paired: any difference between `none`, `second-round` and `debate` comes from round 2 alone. A failed round 2 is retried without redoing round 1. `--single-session` runs both rounds in one session, as the first pilots did. Don't mix the two modes in one run-id.
+**Shared round 1.** For each two-round technique, round 2 runs as its own session, which starts from a finished round 1. `run.py` writes that round 1 into the workspace as `specs/feature/round1-findings.md`, copied from the earlier transcript, plus `round1-briefs.md` with each lens's round-1 brief, and passes `round1=` to the skill. `second-round` and `debate` both start from the `baseline` run's round 1, because all three use the same standard round-1 brief. PTU's round 1 asks for predictions, so it runs on its own (`stop=round1`) in `ptu/rep<k>/round1/`. This saves two of the three standard round-1 fan-outs per case. It also makes the comparison paired: any difference between `baseline`, `second-round` and `debate` comes from round 2 alone. A failed round 2 is retried without redoing round 1. `--single-session` runs both rounds in one session, as the first pilots did. Don't mix the two modes in one run-id.
 
 **Orchestrator settings.** `--orchestrator-model` defaults to `opus`, because debate gets blocked with a Sonnet orchestrator. `--orchestrator-effort` defaults to `medium`. It sets `claude -p --effort` for the orchestrator session. Lenses are still Sonnet, set by their agent files. Check on the pilot whether the effort setting also reaches the lenses. If it does, it applies equally to every technique, but it changes what the lenses produce, so keep it the same for the whole experiment.
 
@@ -68,7 +68,7 @@ py experiment\analyze.py summary --run-id pilot
 
 Check before the full run:
 
-- **The cases aren't too easy.** If the `none` arm already has recall near 1, close to 0 contradictions, and most tensions reconciled, the cases can't separate the techniques. Make them harder first.
+- **The cases aren't too easy.** If the `baseline` arm already has recall near 1, close to 0 contradictions, and most tensions reconciled, the cases can't separate the techniques. Make them harder first.
 - **Token accounting.** In any `meta.json`, check `usage.models`. If it lists only the orchestrator model, `claude -p` isn't reporting lens (subagent) tokens, and `tokens_total` undercounts.
 - **Every lens output was captured.** In `lens_outputs.json`, `complete` should be `true` and `problems` empty. The judge reads lens outputs only from there.
 - **A few lens outputs and judge outputs by hand,** to confirm the techniques ran as written.
@@ -101,7 +101,7 @@ With shared round 1 (the default):
 
 | Technique | Lens calls it runs (Sonnet) | Orchestrator sessions | Judge calls (Sonnet) |
 | --- | --- | --- | --- |
-| `none` | 5 (round 1, shared) | 1 | 1 (final) |
+| `baseline` | 5 (round 1, shared) | 1 | 1 (final) |
 | `second-round` | 5 (round 2) | 1 | 2 (final, flips) |
 | `debate` | 5 (round 2) | 1 | 2 (final, flips) |
 | `ptu` | 10 (own round 1, round 2) | 2 | 3 (final, flips, predictions) |
@@ -116,7 +116,7 @@ With `--single-session`, every two-round technique makes 10 lens calls in 1 sess
 
 Round-2 lens calls are larger than round-1 calls, because each round-2 lens reads all five round-1 outputs from `specs/feature/round1-findings.md`. The round-2 briefs give the file's path instead of pasting the outputs: pasting them into all five briefs made Opus retype about 50-65k tokens per run. With shared round 1, `run.py` writes the file. With `--single-session`, the orchestrator writes it, `run.py` copies it into the run folder, and `meta.json` → `round1_file.verbatim` records per lens whether it matches the round-1 output in the transcript. In a smoke test, Opus copied one sentence wrong. PTU round-1 calls are slightly larger too, because they include predictions.
 
-A round-2 run's `meta.json` has `round1_usage` and `round1_wall_seconds` from the round 1 it started from. `analyze.py` adds them to `tokens_total` and `wall_seconds`, so every technique is costed end to end, even though the `none` round 1 is only paid for once. To estimate the full run's usage, add up `tokens_total` for the `none` run plus the round-2 session tokens for each technique from the pilot, then multiply by 30 per rep.
+A round-2 run's `meta.json` has `round1_usage` and `round1_wall_seconds` from the round 1 it started from. `analyze.py` adds them to `tokens_total` and `wall_seconds`, so every technique is costed end to end, even though the `baseline` round 1 is only paid for once. To estimate the full run's usage, add up `tokens_total` for the `baseline` run plus the round-2 session tokens for each technique from the pilot, then multiply by 30 per rep.
 
 ## Metrics
 

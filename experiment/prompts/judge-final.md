@@ -19,8 +19,8 @@ You don't see the plan or the code. Judge only from the findings and the ground 
 3. **Contradictions (main metric).** List every pair of findings **from different lenses** whose recommendations can't both be followed as written: doing one rules out doing the other, or undoes it. Two findings about different topics are not a contradiction. A finding that mentions and accommodates another lens's concern is not a contradiction. List each pair once.
 
 4. **Seeded tensions.** For every seeded tension, give a status:
-   - `reconciled`: the final findings explicitly address the conflict, with a recommendation that satisfies both concerns (or explicitly trades one off against the other with a reason).
-   - `unreconciled_conflict`: both sides are raised, but their recommendations still conflict.
+   - `reconciled`: at least one finding, on its own, recommends a fix that satisfies both concerns (or explicitly trades one off against the other with a reason), **and** no final finding still recommends one side in a way that conflicts with that fix. Don't assemble a reconciliation yourself from separate findings that each cover one side.
+   - `unreconciled_conflict`: both sides are raised, but no single finding reconciles them, or some finding still recommends a side that conflicts with the reconciling one.
    - `one_side_only`: only one side's concern appears.
    - `neither`: neither side appears.
 
