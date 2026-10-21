@@ -87,6 +87,12 @@ To add reps, run the same commands with `--reps 2`, then `--reps 3`, under the s
 
 **Resuming.** Run the same command again. Runs with a `done.json` are skipped, and failed runs are retried. A finished round 1 is never redone. `run.py` stops at the first failure that looks like a usage limit, and after 3 failures in a row of any kind. Wait for the limit to reset, then run the same command again. `judge.py` resumes the same way. A session cut off by the limit wastes what it used, so start big batches right after your limit resets.
 
+**Unattended.** Add `--wait-for-reset` to `run.py` or `judge.py` to resume on its own. After a usage limit, it sleeps until the limit's reset time (read from claude's output, plus 2 minutes), then runs the same command again. If the reset time isn't in the output, it checks again every 20 minutes. It gives up once the reset falls more than 24 hours after it started. Pass a number of hours to change that, as in `--wait-for-reset 72`. A weekly limit usually lies outside that window, so it ends the loop. Keep the PC awake, for example with `powercfg /change standby-timeout-ac 0`, because sleep pauses the run. For the whole pipeline:
+
+```bat
+py experiment\run.py --run-id full --cases all --workers 1 --wait-for-reset 72 && py experiment\judge.py --run-id full --wait-for-reset 72 && py experiment\analyze.py summary --run-id full
+```
+
 `--workers 2` runs two orchestrators at once, and each starts five lenses in parallel, so up to 10 Sonnet subagents run at a time. Use `--workers 1` if you hit limits quickly.
 
 ## Usage per run

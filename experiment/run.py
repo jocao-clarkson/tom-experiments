@@ -137,6 +137,48 @@ def result_event(stdout):
     return found
 
 
+LIMIT_ERROR = re.compile(r'"api_error"\s*:\s*"usage_limit_reached"|"error"\s*:\s*"rate_limit"')
+LIMIT_TEXT = re.compile(r"session limit|usage limit|weekly limit|rate limit|limit reached|quota", re.I)
+POLL_SECONDS = 20 * 60
+
+
+def usage_limited(stdout, result_text, stderr):
+    """Whether claude stopped on a usage limit. The structured error is checked
+    in the whole stream, the wording only in the result and stderr: lens output
+    can mention rate limits."""
+    return bool(LIMIT_ERROR.search(stdout) or LIMIT_TEXT.search(result_text + stderr))
+
+
+def reset_time(text):
+    """Epoch seconds when the usage limit lifts, from claude's output, or None."""
+    # The rejected window's reset, not the other windows listed beside it
+    # (a weekly window can reset days later than the 5-hour one that hit).
+    times = [int(t) for t in re.findall(r'"status"\s*:\s*"rejected"\s*,\s*"resetsAt"\s*:\s*(\d+)', text)]
+    if times:
+        return max(times)
+    m = re.search(r"resets (\d{1,2})(?::(\d{2}))?\s*([ap]m)", text, re.I)
+    if not m:
+        return None
+    hour = int(m.group(1)) % 12 + (12 if m.group(3).lower() == "pm" else 0)
+    t = datetime.datetime.now().replace(hour=hour, minute=int(m.group(2) or 0), second=0, microsecond=0)
+    if t <= datetime.datetime.now():
+        t += datetime.timedelta(days=1)
+    return int(t.timestamp())
+
+
+def wait_for_reset(resets_at, deadline):
+    """Sleep until the usage limit should have lifted, or POLL_SECONDS if the
+    reset time is unknown. False, without sleeping, if that is past deadline."""
+    wake = max(resets_at + 120 if resets_at else time.time() + POLL_SECONDS, time.time() + 60)
+    when = datetime.datetime.fromtimestamp(wake).strftime("%a %H:%M")
+    if wake > deadline:
+        print(f"usage limit lifts after the --wait-for-reset window (around {when}); giving up", flush=True)
+        return False
+    print(f"usage limit; waiting until {when} to resume", flush=True)
+    time.sleep(wake - time.time())
+    return True
+
+
 def usage_summary(result):
     """Token counts from a result event, summed over every model it reports."""
     if not result:
@@ -517,9 +559,11 @@ def run_one(run_id, case, technique, rep, args, stage="full"):
         reason = f"result error: {result.get('subtype')}"
     elif not lens["complete"]:
         reason = "lens outputs incomplete"
-    text = ((result or {}).get("result") or "") + stderr
-    if reason and re.search(r"usage limit|rate limit|limit reached|quota", text, re.I):
+    result_text = (result or {}).get("result") or ""
+    resets_at = None
+    if reason and usage_limited(stdout, result_text, stderr):
         reason += " (looks like a usage limit)"
+        resets_at = reset_time(stdout + result_text + stderr)
 
     meta = {
         "run_id": run_id,
@@ -529,6 +573,7 @@ def run_one(run_id, case, technique, rep, args, stage="full"):
         "stage": stage,
         "status": "failed" if reason else "ok",
         "reason": reason,
+        "resets_at": resets_at,
         "exit_code": code,
         "started_at": started,
         "finished_at": now(),
@@ -576,6 +621,8 @@ def main(argv=None):
     p.add_argument("--single-session", action="store_true",
                    help="run both rounds of a technique in one session (no shared round 1)")
     p.add_argument("--timeout", type=int, default=3600, help="seconds per run")
+    p.add_argument("--wait-for-reset", type=float, nargs="?", const=24, default=None, metavar="HOURS",
+                   help="after a usage limit, wait for it to reset and resume; give up after HOURS (default 24)")
     p.add_argument("--keep-tmp", action="store_true", help="keep each run's temp folder")
     args = p.parse_args(argv)
 
@@ -592,6 +639,17 @@ def main(argv=None):
     # Interleave cases and techniques so drift over a long batch (or hitting a
     # usage limit) doesn't line up with one technique.
     random.Random(args.run_id).shuffle(tasks)
+    deadline = time.time() + 3600 * args.wait_for_reset if args.wait_for_reset else None
+    while True:
+        rc, state = run_batch(args, tasks)
+        if not (deadline and state["resume_after_limit"]):
+            return rc
+        if not wait_for_reset(state["resets_at"], deadline):
+            return rc
+
+
+def run_batch(args, tasks):
+    """Run every unfinished task once. Returns (exit code, state)."""
     todo = [x for x in tasks if not (run_dir(args.run_id, *x) / "done.json").exists()]
 
     def split(t):
@@ -615,11 +673,12 @@ def main(argv=None):
     print(f"{len(tasks)} runs in plan, {len(tasks) - len(todo)} already done, {len(todo)} to go "
           f"({len(sessions)} sessions)" + (" [mock]" if args.mock else ""))
     if not todo:
-        return 0
+        return 0, {"resume_after_limit": False}
 
     lock = threading.Lock()
     stop = threading.Event()
-    state = {"failures_in_a_row": 0, "ok": 0, "failed": 0, "why": None}
+    state = {"failures_in_a_row": 0, "ok": 0, "failed": 0, "why": None,
+             "resume_after_limit": False, "resets_at": None}
     base_locks = {}
 
     def session(c, t, r, stage):
@@ -642,6 +701,8 @@ def main(argv=None):
                 # Every session after this fails the same way, so stop now
                 # instead of burning the next ones.
                 state["why"] = "a usage limit"
+                state["resume_after_limit"] = True
+                state["resets_at"] = meta.get("resets_at")
                 stop.set()
             elif state["failures_in_a_row"] >= STOP_AFTER_FAILURES:
                 state["why"] = f"{STOP_AFTER_FAILURES} failures in a row"
@@ -674,8 +735,8 @@ def main(argv=None):
     if stop.is_set():
         print(f"stopped after {state['why']}. Check the last meta.json, "
               "then re-run the same command to resume.")
-        return 1
-    return 0 if state["failed"] == 0 else 1
+        return 1, state
+    return (0 if state["failed"] == 0 else 1), state
 
 
 # --------------------------------------------------------------------------

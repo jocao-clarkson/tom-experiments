@@ -22,6 +22,7 @@ import re
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 import run as runner
@@ -153,6 +154,12 @@ def parse_answer(text, task):
     return obj
 
 
+class UsageLimit(Exception):
+    def __init__(self, resets_at):
+        super().__init__("usage limit")
+        self.resets_at = resets_at
+
+
 def call_judge(task, data, args):
     stdin = judge_prompt(task, data)
     cwd = Path(tempfile.mkdtemp(prefix="vjudge-"))  # empty: nothing to read
@@ -170,6 +177,9 @@ def call_judge(task, data, args):
                 except json.JSONDecodeError:
                     result = None
             if timed_out or code != 0 or not result or result.get("is_error"):
+                result_text = (result or {}).get("result") or ""
+                if runner.usage_limited(out, result_text, err):
+                    raise UsageLimit(runner.reset_time(out + result_text + err))
                 last_error = f"exit={code} timed_out={timed_out} {err.strip()[:300]}"
                 continue
             try:
@@ -224,6 +234,8 @@ def main(argv=None):
     p.add_argument("--mock", action="store_true", help="fake claude -p; spends no usage")
     p.add_argument("--rejudge", action="store_true", help="judge again even if judge.json exists")
     p.add_argument("--timeout", type=int, default=900)
+    p.add_argument("--wait-for-reset", type=float, nargs="?", const=24, default=None, metavar="HOURS",
+                   help="after a usage limit, wait for it to reset and resume; give up after HOURS (default 24)")
     args = p.parse_args(argv)
 
     root = RESULTS / args.run_id / "runs"
@@ -235,19 +247,39 @@ def main(argv=None):
     if args.mock and not config.get("mock"):
         sys.exit("these are real runs; don't judge them with --mock")
 
+    deadline = time.time() + 3600 * args.wait_for_reset if args.wait_for_reset else None
+    while True:
+        rc, limit = judge_batch(root, args)
+        if not (deadline and limit):
+            return rc
+        if not runner.wait_for_reset(limit.resets_at, deadline):
+            return rc
+
+
+def judge_batch(root, args):
+    """Judge every unjudged finished run once. Returns (exit code, the
+    UsageLimit that stopped it or None)."""
     done = sorted(d.parent for d in root.glob("*/*/rep*/done.json"))
     todo = [d for d in done if args.rejudge or not (d / "judge.json").exists()]
     print(f"{len(done)} finished runs, {len(done) - len(todo)} already judged, {len(todo)} to judge"
           + (" [mock]" if args.mock else ""))
 
     lock = threading.Lock()
-    counts = {"ok": 0, "failed": 0}
+    stop = threading.Event()
+    counts = {"ok": 0, "failed": 0, "limit": None}
 
     def work(rdir):
+        if stop.is_set():
+            return
         name = "/".join(rdir.relative_to(root).parts)
         try:
             judge_run(rdir, args)
             status = "ok"
+        except UsageLimit as e:
+            # The rest would fail the same way; leave them for the next pass.
+            counts["limit"] = e
+            stop.set()
+            status = "FAILED (usage limit)"
         except Exception as e:  # keep going; the run stays unjudged and is retried next time
             (rdir / "judge_error.txt").write_text(str(e), encoding="utf-8")
             status = f"FAILED ({e})"
@@ -258,7 +290,9 @@ def main(argv=None):
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.workers)) as pool:
         list(pool.map(work, todo))
     print(f"done: {counts['ok']} judged, {counts['failed']} failed")
-    return 0 if counts["failed"] == 0 else 1
+    if counts["limit"]:
+        print("stopped at a usage limit; re-run the same command to resume.")
+    return (0 if counts["failed"] == 0 else 1), counts["limit"]
 
 
 if __name__ == "__main__":
