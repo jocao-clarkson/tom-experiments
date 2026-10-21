@@ -18,7 +18,8 @@ You don't see the plan or the code. Judge only from the findings and the ground 
 
 3. **Seeded tensions.** For every seeded tension, give a status:
    - `reconciled`: at least one finding, on its own, recommends a fix that satisfies both concerns (or explicitly trades one off against the other with a reason), **and** no final finding still recommends one side in a way that conflicts with that fix. Don't assemble a reconciliation yourself from separate findings that each cover one side.
-   - `unreconciled_conflict`: both sides are raised, but no single finding reconciles them, or some finding still recommends a side that conflicts with the reconciling one.
+   - `unreconciled_conflict`: both sides are raised and their recommendations clash: following one as written rules out or undoes the other. This includes a reconciling finding that some other finding still contradicts.
+   - `unreconciled_compatible`: both sides are raised and their recommendations could both be followed, but no single finding combines them into the fix that satisfies both concerns.
    - `one_side_only`: only one side's concern appears.
    - `neither`: neither side appears.
 

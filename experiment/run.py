@@ -927,7 +927,7 @@ def fake_judge(stdin):
             if a[0] != b[0]:
                 contradictions.append({"a": {"lens": a[0], "id": a[1]}, "b": {"lens": b[0], "id": b[1]},
                                        "why": "mock"})
-        tensions = [{"id": t["id"], "status": rng.choice(["reconciled", "unreconciled_conflict", "one_side_only", "neither"]),
+        tensions = [{"id": t["id"], "status": rng.choice(["reconciled", "unreconciled_conflict", "unreconciled_compatible", "one_side_only", "neither"]),
                      "evidence": "mock"} for t in data["tensions"]]
         answer = {"findings": findings, "contradictions": contradictions, "tensions": tensions}
     elif task == "flips":

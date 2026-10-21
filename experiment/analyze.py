@@ -33,21 +33,28 @@ COMPARISONS = [
     ("debate", "baseline"),
     ("ptu", "baseline"),
 ]
+# tension_resolved_rate is the primary metric (see README, "Metrics").
 COMPARE_METRICS = [
-    "contradictions",
     "tension_resolved_rate",
+    "tension_clash_rate",
+    "contradictions",
     "recall",
     "precision",
     "flip_rate",
     "out_of_lane_rate",
+    "n_findings",
+    "words_per_finding",
     "tokens_total",
     "wall_seconds",
 ]
 SUMMARY_METRICS = [
-    "contradictions",
-    "n_findings",
     "tensions_resolved",
     "tension_resolved_rate",
+    "tension_clash_rate",
+    "tension_uncombined_rate",
+    "contradictions",
+    "n_findings",
+    "words_per_finding",
     "recall",
     "precision",
     "flip_rate",
@@ -97,9 +104,14 @@ def run_metrics(rdir):
     out_of_lane = sum(1 for f in judged_findings.values() if f.get("out_of_lane"))
 
     pairs = contradiction_pairs(contradictions_output(judged), refs)
-    resolved = sum(
-        1 for t in final_out["tensions"] if t.get("id") in tension_ids and t.get("status") == "reconciled"
-    )
+    status = {t.get("id"): t.get("status") for t in final_out["tensions"] if t.get("id") in tension_ids}
+    resolved = sum(s == "reconciled" for s in status.values())
+    clashing = sum(s == "unreconciled_conflict" for s in status.values())
+    uncombined = sum(s == "unreconciled_compatible" for s in status.values())
+    # Guardrail: long findings that try to cover every concern could score
+    # as reconciled without better reasoning.
+    words = [len(" ".join(str(v) for v in f.values()).split())
+             for fs in final_in["findings"].values() for f in fs]
 
     row = {
         "run_id": meta["run_id"],
@@ -113,6 +125,9 @@ def run_metrics(rdir):
         "tensions_total": len(tension_ids),
         "tensions_resolved": resolved,
         "tension_resolved_rate": ratio(resolved, len(tension_ids)),
+        "tension_clash_rate": ratio(clashing, len(tension_ids)),
+        "tension_uncombined_rate": ratio(uncombined, len(tension_ids)),
+        "words_per_finding": ratio(sum(words), len(words)),
         "defects_total": len(defect_ids),
         "defects_found": len(found),
         "recall": ratio(len(found), len(defect_ids)),
@@ -307,8 +322,8 @@ def cmd_summary(args):
             for (l, pe), v in sorted(agg.items())
         ])
 
-    cols = ["technique", "n_judged", "n_failed", "contradictions", "tension_resolved_rate", "recall",
-            "precision", "flip_rate", "pred_recall", "out_of_lane_rate", "tokens_total", "wall_seconds"]
+    cols = ["technique", "n_judged", "n_failed", "tension_resolved_rate", "tension_clash_rate", "contradictions",
+            "recall", "precision", "flip_rate", "pred_recall", "n_findings", "words_per_finding", "tokens_total"]
     print(f"run-id {args.run_id}: {len(rows)} judged runs, {len(failed)} failed runs")
     print_table(summary, cols)
     print(f"\nwrote {out}")

@@ -1,6 +1,6 @@
 # Experiment: PTU vs debate in the plan-phase gate
 
-**Question.** In the plan phase of `/validation-orchestrator`, does predict-then-update (PTU) reduce contradictions between the five lenses more than debate does, without making the lenses miss real problems?
+**Question.** In the plan phase of `/validation-orchestrator`, does predict-then-update (PTU) get the five lenses to reconcile conflicting concerns more often than debate does, without making the lenses miss real problems? (The question first asked about reducing contradictions; see "Primary metric" under Metrics for why it changed.)
 
 | Technique | Arm | Lens rounds | What round 2 adds |
 | --- | --- | --- | --- |
@@ -68,7 +68,7 @@ py experiment\analyze.py summary --run-id pilot
 
 Check before the full run:
 
-- **The cases aren't too easy.** If the `baseline` arm already has recall near 1, close to 0 contradictions, and most tensions reconciled, the cases can't separate the techniques. Make them harder first.
+- **The cases aren't too easy.** If the `baseline` arm already reconciles most tensions, the cases can't separate the techniques on the primary metric. Aim for at most half reconciled (see `cases/AUTHORING.md`, "Difficulty"). Recall near 1 is fine: it's a guardrail and only has to show a drop.
 - **Token accounting.** In any `meta.json`, check `usage.models`. If it lists only the orchestrator model, `claude -p` isn't reporting lens (subagent) tokens, and `tokens_total` undercounts.
 - **Every lens output was captured.** In `lens_outputs.json`, `complete` should be `true` and `problems` empty. The judge reads lens outputs only from there.
 - **A few lens outputs and judge outputs by hand,** to confirm the techniques ran as written.
@@ -122,14 +122,27 @@ A round-2 run's `meta.json` has `round1_usage` and `round1_wall_seconds` from th
 
 The judge runs as separate `claude -p --model sonnet` sessions in an empty folder, with the fixed prompts in `prompts/`.
 
-- **final** (every run) sees only the final findings, as parsed `FINDINGS` sections, plus the seeded defects and tensions. It never sees the technique name or any summary, prediction, debate, or surprise block.
+- **final** (every run) sees only the final findings, as parsed `FINDINGS` sections, plus the seeded defects and tensions. It never sees the technique name or any summary, prediction, debate, or surprise block. It matches findings to defects and gives each tension a status.
+- **contradictions** (every run) sees only the final findings, without even the ground truth. It groups findings by what their recommendation changes, then checks cross-lens pairs within each group.
 - **flips** (C1, D, PTU) sees the round-1 and round-2 findings, with the same blinding.
 - **predictions** (PTU only) sees the predictions and the peers' round-1 findings. It can't be blinded, because the predictions are PTU's own output.
 
+### Primary metric: tension reconciliation
+
+**`tension_resolved_rate` is the primary metric,** and everything else is secondary. This was decided after the pilot and calibration and before the full run. Any write-up should say so.
+
+The original primary metric was `contradictions`. The pilot and calibration showed that one-round lenses rarely make recommendations that clash outright. Instead, each lens fixes its own side of a tension and nobody combines the fixes. Contradiction counts sat near zero in every arm, which leaves nothing for a technique to reduce. Judged twice with identical instructions inside the `final` task, the pilot's contradictions also didn't overlap at all: 9 pairs each, none shared. With their own task they agree much better (Jaccard 0.60 across 3 repeats), but they stay rare. Reconciliation captures the failure that does happen. `baseline` reconciled 1 of 7 tensions in the calibration cases that followed the authoring rules, which leaves room for the techniques to differ.
+
+Its limits: it only covers the tensions we seeded, and its judge has to see the ground truth. A technique could also inflate it with long findings that try to cover every concern. Report it next to the guardrails, which are `precision`, `n_findings`, `words_per_finding` and `out_of_lane_rate`. A rise in reconciliation that comes with longer, less precise findings isn't a clean win. Check the judge's consistency on tension statuses with `judge_agreement.py --task final` before relying on small differences. On 5 calibration runs judged 3 times each, the reconciled-or-not call agreed for 9 of 11 tensions, the full status for 8 of 11, and the defect matches for 97% of findings. The disagreements were borderline cases where one finding came close to the combined fix. If the full calibration confirms this, consider taking the majority status over 3 judgings.
+
+Tension statuses: `reconciled` means one finding gives a fix that satisfies both concerns, and no finding still pushes a conflicting side. `unreconciled_conflict` means both sides are raised and their recommendations clash. `unreconciled_compatible` means both sides are raised and could both be followed, but nobody combined them. `one_side_only` and `neither` cover the rest.
+
 | Metric | Definition |
 | --- | --- |
-| `contradictions` (main) | Pairs of final findings from different lenses whose recommendations can't both be followed |
-| `tension_resolved_rate` | Seeded tensions the judge marks `reconciled` ÷ seeded tensions |
+| `tension_resolved_rate` (primary) | Seeded tensions the judge marks `reconciled` ÷ seeded tensions |
+| `tension_clash_rate` | Seeded tensions marked `unreconciled_conflict` ÷ seeded tensions; `tension_uncombined_rate` is the same for `unreconciled_compatible` |
+| `contradictions` | Pairs of final findings from different lenses whose recommendations can't both be followed, from the `contradictions` task |
+| `words_per_finding` | Mean words per final finding (guardrail) |
 | `recall` | Seeded defects matched by at least one final finding ÷ seeded defects |
 | `precision` | Final findings that match a seeded defect ÷ all final findings. Strict: real but unseeded issues count against it. |
 | `flip_rate` | Round-1 findings that matched a defect and were then `dropped` or `reversed` in round 2 ÷ those matched findings |
