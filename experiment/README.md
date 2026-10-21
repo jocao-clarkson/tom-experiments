@@ -83,6 +83,8 @@ py experiment\judge.py --run-id full --workers 2
 py experiment\analyze.py summary --run-id full
 ```
 
+**Run `full`, rep 1, reuses the calibration baselines.** The `baseline` runs for the 24 tension cases were copied from `calib-v2` (case-21 and case-28 from `calib-v3`). They used the same case versions (`case_hash` matches), the same Opus orchestrator at medium effort, and the same skill. Their `meta.json` has `copied_from`. They were re-judged with the current judge. They ran a few hours before the rest of rep 1 instead of interleaved with it, so a small drift between them and the other arms can't be ruled out. The 6 clean-case baselines and all other arms ran in `full` itself.
+
 To add reps, run the same commands with `--reps 2`, then `--reps 3`, under the same run-id. Rep 1 is already done, so only the new rep runs.
 
 **Resuming.** Run the same command again. Runs with a `done.json` are skipped, and failed runs are retried. A finished round 1 is never redone. `run.py` stops at the first failure that looks like a usage limit, and after 3 failures in a row of any kind. Wait for the limit to reset, then run the same command again. `judge.py` resumes the same way. A session cut off by the limit wastes what it used, so start big batches right after your limit resets.
