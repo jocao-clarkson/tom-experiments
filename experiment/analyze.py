@@ -122,9 +122,12 @@ def run_metrics(rdir):
         "flip_rate": None,
         "pred_recall": None,
         "pred_precision": None,
-        "tokens_total": (meta.get("usage") or {}).get("total_tokens"),
+        # A round-2 session started from a separate round 1; count that too, so
+        # every technique is costed end to end.
+        "tokens_total": (meta.get("usage") or {}).get("total_tokens", 0)
+        + (meta.get("round1_usage") or {}).get("total_tokens", 0),
         "judge_tokens": sum((c.get("usage") or {}).get("total_tokens", 0) for c in judged["outputs"].values()),
-        "wall_seconds": meta.get("wall_seconds"),
+        "wall_seconds": (meta.get("wall_seconds") or 0) + (meta.get("round1_wall_seconds") or 0),
         "lens_calls": meta.get("lens_calls"),
     }
 

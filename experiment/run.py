@@ -10,6 +10,12 @@ Results land in experiment/results/<run-id>/runs/<case>/<technique>/rep<k>/.
 A run that finished has a done.json and is skipped when the same run-id is
 re-run, so an interrupted batch can resume.
 
+Two-round techniques run round 2 as its own session, started from a finished
+round 1 written into the workspace (round1=...). second-round and debate reuse
+the `none` run's round 1; PTU's predicting round 1 runs in ptu/rep<k>/round1/.
+A failed round 2 is retried without redoing round 1. --single-session runs
+both rounds in one session instead.
+
     py experiment\\run.py --run-id pilot --cases pilot --reps 1
     py experiment\\run.py --run-id smoke --cases case-01,case-02 --mock
 """
@@ -49,8 +55,17 @@ LENS_CALLS = {t: 5 * n for t, n in ROUNDS.items()}
 
 SPEC_REL = "specs/feature/spec.md"
 PLAN_REL = "specs/feature/plan.md"
+ROUND1_REL = "specs/feature/round1-findings.md"
+BRIEFS_REL = "specs/feature/round1-briefs.md"
 ORCHESTRATOR_TOOLS = "Skill,Agent,Read,Grep,Glob,Bash,Write"
 STOP_AFTER_FAILURES = 3
+EFFORTS = ["low", "medium", "high", "xhigh", "max"]
+
+# Unless --single-session, a two-round technique's round 2 is its own session
+# that starts from a finished round 1 (its "base"). second-round and debate
+# share the standard round 1, which is the `none` run itself; PTU's round 1
+# asks for predictions, so it runs alone in ptu/rep<k>/round1/.
+ROUND1_BASE = {"second-round": "none", "debate": "none", "ptu": "ptu"}
 
 
 # --------------------------------------------------------------------------
@@ -200,7 +215,8 @@ def extract_lens_outputs(stdout):
         if ev.get("type") == "system" and ev.get("subtype") == "task_notification":
             notifications[ev.get("tool_use_id")] = ev
             continue
-        content = (ev.get("message") or {}).get("content")
+        message = ev.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
         if not isinstance(content, list):
             continue
         for item in content:
@@ -265,8 +281,8 @@ def tool_result_text(content):
     return ""
 
 
-def complete(rounds, technique):
-    want = ROUNDS[technique]
+def complete(rounds, technique, want=None):
+    want = want or ROUNDS[technique]
     return all(
         set(LENSES) <= set(rounds.get(str(r), {})) for r in range(1, want + 1)
     )
@@ -313,6 +329,14 @@ def run_dir(run_id, case, technique, rep):
     return RESULTS / run_id / "runs" / case / technique / f"rep{rep}"
 
 
+def base_dir(run_id, case, technique, rep):
+    """Where the round 1 that `technique`'s round-2 session starts from lives."""
+    base = ROUND1_BASE[technique]
+    if base == technique:
+        return run_dir(run_id, case, technique, rep) / "round1"
+    return run_dir(run_id, case, base, rep)
+
+
 def record_config(run_id, args, cases, techniques):
     root = RESULTS / run_id
     root.mkdir(parents=True, exist_ok=True)
@@ -332,6 +356,8 @@ def record_config(run_id, args, cases, techniques):
             "techniques": techniques,
             "reps": args.reps,
             "orchestrator_model": args.orchestrator_model,
+            "orchestrator_effort": args.orchestrator_effort,
+            "single_session": args.single_session,
             "workers": args.workers,
         }
     )
@@ -381,14 +407,77 @@ def remove_tree(path):
         pass  # a leftover temp folder is not worth failing a run over
 
 
-def run_one(run_id, case, technique, rep, args):
+def check_round1_file(work, out, rounds, technique):
+    """Keep the round1-findings.md the orchestrator handed to round 2, and note
+    per lens whether its block matches the round-1 output from the transcript."""
+    if ROUNDS[technique] < 2:
+        return None
+    path = work / Path(SPEC_REL).parent / "round1-findings.md"
+    if not path.exists():
+        return {"present": False}
+    text = path.read_text(encoding="utf-8", errors="replace")
+    (out / "round1-findings.md").write_text(text, encoding="utf-8")
+
+    def norm(s):
+        return "\n".join(line.rstrip() for line in s.strip().splitlines())
+
+    blocks = dict(re.findall(r"^=== (lens-[\w-]+) ===\n(.*?)(?=^=== lens-[\w-]+ ===$|\Z)", text, re.M | re.S))
+    r1 = rounds.get("1", {})
+    return {"present": True,
+            "verbatim": {l: l in blocks and l in r1 and norm(blocks[l]) == norm(r1[l]) for l in LENSES}}
+
+
+def load_base(bdir):
+    """A finished round 1: the five outputs, the brief each lens got, and what
+    the session cost. None if it hasn't finished."""
+    if not (bdir / "done.json").exists():
+        return None
+    lens = json.loads((bdir / "lens_outputs.json").read_text(encoding="utf-8"))
+    meta = json.loads((bdir / "meta.json").read_text(encoding="utf-8"))
+    r1 = lens["rounds"].get("1", {})
+    if not complete(lens["rounds"], meta["technique"], want=1):
+        return None
+    briefs = {c["lens"]: c["prompt"] for c in lens["calls"] if c.get("round") == 1 and c["lens"] in LENSES}
+    return {
+        "from": bdir.relative_to(RESULTS).as_posix(),
+        "rounds": {l: r1[l] for l in LENSES},
+        "briefs": briefs,
+        "usage": meta.get("usage") or {},
+        "wall_seconds": meta.get("wall_seconds"),
+    }
+
+
+def write_round1(work, base):
+    """Hand round 1 to the round-2 session as files, copied from the base's
+    transcript, so the orchestrator never retypes it."""
+    def blocks(texts):
+        return "".join(f"=== {l} ===\n{texts.get(l, '').strip()}\n\n" for l in LENSES)
+
+    (work / ROUND1_REL).write_text(blocks(base["rounds"]), encoding="utf-8")
+    (work / BRIEFS_REL).write_text(blocks(base["briefs"]), encoding="utf-8")
+
+
+def run_one(run_id, case, technique, rep, args, stage="full"):
+    """stage "full" runs every round in one session; "round1" runs only PTU's
+    first round (its base); "round2" starts from the finished base round 1."""
     out = run_dir(run_id, case, technique, rep)
+    if stage == "round1":
+        out = out / "round1"
     out.mkdir(parents=True, exist_ok=True)
     work = prepare_workdir(case)
     prompt = (
         f"/validation-orchestrator phase=plan spec={SPEC_REL} "
         f"plan={PLAN_REL} technique={technique}"
     )
+    base = None
+    if stage == "round1":
+        prompt += " stop=round1"
+    elif stage == "round2":
+        base = load_base(base_dir(run_id, case, technique, rep))
+        if base is None:
+            raise RuntimeError(f"{case} {technique} rep{rep}: base round 1 is not done")
+        write_round1(work, base)
+        prompt += f" round1={ROUND1_REL}"
     claude_args = [
         "-p", prompt,
         "--output-format", "stream-json",
@@ -396,6 +485,8 @@ def run_one(run_id, case, technique, rep, args):
         "--model", args.orchestrator_model,
         "--allowedTools", ORCHESTRATOR_TOOLS,
     ]
+    if args.orchestrator_effort != "default":
+        claude_args += ["--effort", args.orchestrator_effort]
     started = now()
     code, stdout, stderr, wall, timed_out = call_claude(
         claude_args, work, args.mock, timeout=args.timeout
@@ -405,7 +496,13 @@ def run_one(run_id, case, technique, rep, args):
     if stderr.strip():
         (out / "stderr.txt").write_text(stderr, encoding="utf-8")
     lens = extract_lens_outputs(stdout)
-    lens["complete"] = complete(lens["rounds"], technique)
+    lens_calls = len([c for c in lens["calls"] if c["lens"] in LENSES])
+    if base:
+        if lens["rounds"].pop("1", None):
+            lens["problems"].append("round-1 lens calls in a round-2 session; replaced with the base round 1")
+        lens["rounds"]["1"] = base["rounds"]
+        lens["round1_from"] = base["from"]
+    lens["complete"] = complete(lens["rounds"], technique, want=1 if stage == "round1" else None)
     (out / "lens_outputs.json").write_text(json.dumps(lens, indent=2), encoding="utf-8")
 
     result = result_event(stdout)
@@ -429,6 +526,7 @@ def run_one(run_id, case, technique, rep, args):
         "case": case,
         "technique": technique,
         "rep": rep,
+        "stage": stage,
         "status": "failed" if reason else "ok",
         "reason": reason,
         "exit_code": code,
@@ -438,10 +536,17 @@ def run_one(run_id, case, technique, rep, args):
         "usage": usage_summary(result),
         "num_turns": (result or {}).get("num_turns"),
         "duration_ms": (result or {}).get("duration_ms"),
-        "lens_calls": len([c for c in lens["calls"] if c["lens"] in LENSES]),
-        "expected_lens_calls": LENS_CALLS[technique],
+        "lens_calls": lens_calls,
+        "expected_lens_calls": LENS_CALLS[technique] if stage == "full" else 5,
         "lens_outputs_complete": lens["complete"],
+        "round1_file": check_round1_file(work, out, lens["rounds"], technique) if stage == "full" else None,
+        # A round-2 session's cost excludes the round 1 it started from; analyze
+        # adds these back so every technique is costed end to end.
+        "round1_from": base["from"] if base else None,
+        "round1_usage": base["usage"] if base else None,
+        "round1_wall_seconds": base["wall_seconds"] if base else None,
         "orchestrator_model": args.orchestrator_model,
+        "orchestrator_effort": args.orchestrator_effort,
         "mock": args.mock,
         "command": ["claude", *claude_args],
     }
@@ -465,7 +570,11 @@ def main(argv=None):
     p.add_argument("--run-id", required=True)
     p.add_argument("--workers", type=int, default=1)
     p.add_argument("--mock", action="store_true", help="fake claude -p; spends no usage")
-    p.add_argument("--orchestrator-model", default="sonnet")
+    p.add_argument("--orchestrator-model", default="opus")
+    p.add_argument("--orchestrator-effort", default="medium", choices=["default", *EFFORTS],
+                   help='--effort for the orchestrator session; "default" leaves it unset')
+    p.add_argument("--single-session", action="store_true",
+                   help="run both rounds of a technique in one session (no shared round 1)")
     p.add_argument("--timeout", type=int, default=3600, help="seconds per run")
     p.add_argument("--keep-tmp", action="store_true", help="keep each run's temp folder")
     args = p.parse_args(argv)
@@ -484,40 +593,86 @@ def main(argv=None):
     # usage limit) doesn't line up with one technique.
     random.Random(args.run_id).shuffle(tasks)
     todo = [x for x in tasks if not (run_dir(args.run_id, *x) / "done.json").exists()]
-    print(f"{len(tasks)} runs in plan, {len(tasks) - len(todo)} already done, {len(todo)} to go"
-          + (" [mock]" if args.mock else ""))
+
+    def split(t):
+        return not args.single_session and ROUNDS[t] == 2
+
+    def base_session(c, t, r):
+        """(case, technique, rep, stage) of the session that makes t's round 1."""
+        b = ROUND1_BASE[t]
+        return (c, b, r, "round1" if b == t else "full")
+
+    # Sessions still to run: a round-2 session also needs its base, and
+    # second-round and debate share one (the `none` run).
+    sessions = set()
+    for c, t, r in todo:
+        if split(t):
+            if not (base_dir(args.run_id, c, t, r) / "done.json").exists():
+                sessions.add(base_session(c, t, r))
+            sessions.add((c, t, r, "round2"))
+        else:
+            sessions.add((c, t, r, "full"))
+    print(f"{len(tasks)} runs in plan, {len(tasks) - len(todo)} already done, {len(todo)} to go "
+          f"({len(sessions)} sessions)" + (" [mock]" if args.mock else ""))
     if not todo:
         return 0
 
     lock = threading.Lock()
     stop = threading.Event()
-    state = {"failures_in_a_row": 0, "ok": 0, "failed": 0}
+    state = {"failures_in_a_row": 0, "ok": 0, "failed": 0, "why": None}
+    base_locks = {}
 
-    def work(task):
+    def session(c, t, r, stage):
+        """Run one session and report it. True if it succeeded."""
         if stop.is_set():
-            return None
-        meta = run_one(args.run_id, *task, args)
+            return False
+        meta = run_one(args.run_id, c, t, r, args, stage)
         with lock:
             n = state["ok"] + state["failed"] + 1
+            label = t if stage == "full" else f"{t} {stage}"
             tag = "ok" if meta["status"] == "ok" else f"FAILED ({meta['reason']})"
-            print(f"[{n}/{len(todo)}] {task[0]} {task[1]} rep{task[2]}: {tag} "
-                  f"{meta['wall_seconds']}s", flush=True)
+            print(f"[{n}/{len(sessions)}] {c} {label} rep{r}: {tag} {meta['wall_seconds']}s", flush=True)
             if meta["status"] == "ok":
                 state["ok"] += 1
                 state["failures_in_a_row"] = 0
-            else:
-                state["failed"] += 1
-                state["failures_in_a_row"] += 1
-                if state["failures_in_a_row"] >= STOP_AFTER_FAILURES:
-                    stop.set()
-        return meta
+                return True
+            state["failed"] += 1
+            state["failures_in_a_row"] += 1
+            if "usage limit" in (meta["reason"] or ""):
+                # Every session after this fails the same way, so stop now
+                # instead of burning the next ones.
+                state["why"] = "a usage limit"
+                stop.set()
+            elif state["failures_in_a_row"] >= STOP_AFTER_FAILURES:
+                state["why"] = f"{STOP_AFTER_FAILURES} failures in a row"
+                stop.set()
+            return False
+
+    def work(task):
+        c, t, r = task
+        if stop.is_set() or (run_dir(args.run_id, c, t, r) / "done.json").exists():
+            return  # finished meanwhile, as another technique's base
+        if args.single_session:
+            session(c, t, r, "full")
+            return
+        # `none` is also the shared base, so it takes the same lock as the
+        # round-2 sessions waiting on it.
+        key = base_session(c, t, r) if split(t) else (c, t, r, "full")
+        bdir = base_dir(args.run_id, c, t, r) if split(t) else run_dir(args.run_id, c, t, r)
+        with lock:
+            base_lock = base_locks.setdefault(key, threading.Lock())
+        with base_lock:
+            if not (bdir / "done.json").exists() and not session(*key):
+                return
+        if split(t):
+            session(c, t, r, "round2")
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.workers)) as pool:
         list(pool.map(work, todo))
 
     print(f"done: {state['ok']} ok, {state['failed']} failed")
     if stop.is_set():
-        print(f"stopped after {STOP_AFTER_FAILURES} failures in a row. Check the last meta.json, "
+        print(f"stopped after {state['why']}. Check the last meta.json, "
               "then re-run the same command to resume.")
         return 1
     return 0 if state["failed"] == 0 else 1
@@ -592,6 +747,8 @@ def lens_text(lens, findings, extra=""):
 def fake_orchestrator(prompt):
     params = dict(re.findall(r"(\w+)=(\S+)", prompt))
     technique = params.get("technique", "none")
+    given_round1 = "round1" in params and Path(params["round1"]).exists()
+    stop_after_round1 = params.get("stop") == "round1"
     plan = Path(params.get("plan", PLAN_REL))
     plan_text = plan.read_text(encoding="utf-8", errors="replace") if plan.exists() else ""
     seed = hashlib.sha256((plan_text + technique).encode()).hexdigest()
@@ -630,10 +787,12 @@ def fake_orchestrator(prompt):
                     parts.append("  conflicts_with_mine: none")
             extra = "\n".join(parts)
         r1[lens] = lens_text(lens, r1_findings[lens], extra)
-    round_of(1, r1)
-    rounds = {"1": r1}
+    rounds = {}
+    if not given_round1:
+        round_of(1, r1)
+        rounds["1"] = r1
 
-    if ROUNDS.get(technique, 1) == 2:
+    if ROUNDS.get(technique, 1) == 2 and not stop_after_round1:
         r2 = {}
         for lens in LENSES:
             kept = [f for f in r1_findings[lens] if rng.random() > 0.2]
