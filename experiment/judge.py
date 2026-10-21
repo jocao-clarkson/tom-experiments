@@ -2,9 +2,12 @@
 
 For every finished run in experiment/results/<run-id>/ without a judge.json:
 
-- final        (all techniques): seeded tensions, defect matches, out-of-lane.
-               Blind: the judge sees only the final findings and the ground truth,
-               with no technique name and no predictions, debate or surprise blocks.
+- final        (all techniques): defect matches, out-of-lane. Blind: the judge
+               sees only the final findings and the ground truth, with no technique
+               name and no predictions, debate or surprise blocks.
+- tensions     (tension cases): status of each seeded tension, from a step-by-step
+               checklist. Judged --tension-votes times (default 3); each tension
+               takes the majority status. Same blinding.
 - contradictions (all techniques): pairs of final findings from different lenses
                that can't both be followed, found topic by topic. The judge sees
                only the final findings, not even the ground truth.
@@ -34,7 +37,8 @@ PROMPTS = Path(__file__).resolve().parent / "prompts"
 INSTRUCTION = "Follow the judge instructions and the JUDGE TASK in the input, and reply with only the JSON object."
 HEADER = re.compile(r"^[A-Z][A-Z \-]*:")
 REQUIRED = {
-    "final": ["findings", "tensions"],
+    "final": ["findings"],
+    "tensions": ["tensions"],
     "contradictions": ["topics", "contradictions"],
     "flips": ["round1_matches"],
     "predictions": ["pairs"],
@@ -122,6 +126,11 @@ def build_inputs(rounds, gt, technique):
             "findings": {l: parse_findings(rounds[final].get(l, "")) for l in LENSES},
         },
     }
+    if tensions:
+        tasks["tensions"] = {
+            "tensions": tensions,
+            "findings": {l: parse_findings(rounds[final].get(l, "")) for l in LENSES},
+        }
     if ROUNDS[technique] == 2:
         tasks["flips"] = {
             "defects": defects,
@@ -208,6 +217,38 @@ def call_judge(task, data, args):
 # Main
 
 
+# Ties (only possible with an even vote count) go against `reconciled`, the
+# primary metric, so a split jury never inflates it.
+TIE_ORDER = ["unreconciled_conflict", "unreconciled_compatible", "one_side_only", "neither", "reconciled"]
+
+
+def majority_tensions(votes):
+    """Per tension, the most common status across votes, with the vote split."""
+    by_id = {}
+    for vote in votes:
+        for t in vote["parsed"]["tensions"]:
+            by_id.setdefault(t.get("id"), []).append(t)
+    result = []
+    for tid, ts in by_id.items():
+        statuses = [t.get("status") for t in ts]
+        top = max(statuses.count(s) for s in set(statuses))
+        status = next(s for s in TIE_ORDER + statuses if statuses.count(s) == top)
+        pick = next(t for t in ts if t.get("status") == status)
+        result.append({**pick, "status": status, "votes": statuses})
+    return {"tensions": result}
+
+
+def judge_tensions(data, args):
+    votes = [call_judge("tensions", data, args) for _ in range(max(1, args.tension_votes))]
+    usage = {}
+    for v in votes:
+        for k, n in (v.get("usage") or {}).items():
+            if isinstance(n, int):
+                usage[k] = usage.get(k, 0) + n
+    return {"parsed": majority_tensions(votes), "votes": votes, "usage": usage,
+            "wall_seconds": round(sum(v.get("wall_seconds") or 0 for v in votes), 1)}
+
+
 def judge_run(rdir, args):
     meta = json.loads((rdir / "meta.json").read_text(encoding="utf-8"))
     technique = meta["technique"]
@@ -225,7 +266,9 @@ def judge_run(rdir, args):
     if args.tasks and (rdir / "judge.json").exists():
         old = json.loads((rdir / "judge.json").read_text(encoding="utf-8"))["outputs"]
     outputs = {
-        task: old[task] if task in old and task not in args.tasks else call_judge(task, data, args)
+        task: old[task] if task in old and task not in args.tasks
+        else judge_tensions(data, args) if task == "tensions"
+        else call_judge(task, data, args)
         for task, data in inputs.items()
     }
     record = {
@@ -253,6 +296,8 @@ def main(argv=None):
     p.add_argument("--tasks", type=lambda s: [t.strip() for t in s.split(",") if t.strip()], default=None,
                    help="with --rejudge, rerun only these tasks (comma list of final, flips, predictions)")
     p.add_argument("--timeout", type=int, default=900)
+    p.add_argument("--tension-votes", type=int, default=3,
+                   help="judge each run's tensions this many times and take the majority (default 3)")
     p.add_argument("--wait-for-reset", type=float, nargs="?", const=24, default=None, metavar="HOURS",
                    help="after a usage limit, wait for it to reset and resume; give up after HOURS (default 24)")
     args = p.parse_args(argv)

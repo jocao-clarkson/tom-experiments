@@ -8,6 +8,12 @@ here touches judge.json.
 
     py experiment\\judge_agreement.py --run-id pilot --task contradictions --reps 3
     py experiment\\judge_agreement.py --run-id pilot --task final --reps 2 --limit 8
+    py experiment\\judge_agreement.py --run-id pilot --task tensions --reps 6 --majority 3
+
+With --majority k, the repeats are also split into consecutive groups of k,
+each group is reduced to a majority status per tension (as judge.py does with
+--tension-votes k), and the groups are compared: the agreement of the score
+that analyze.py actually uses.
 """
 
 import argparse
@@ -29,7 +35,10 @@ def judge_repeats(rdir, task, reps, args):
     gt_path = rdir / "ground_truth.json"
     if not gt_path.exists():
         gt_path = runner.CASES / meta["case"] / "ground_truth.json"
-    data = judge.build_inputs(rounds, json.loads(gt_path.read_text(encoding="utf-8")), meta["technique"])[task]
+    inputs = judge.build_inputs(rounds, json.loads(gt_path.read_text(encoding="utf-8")), meta["technique"])
+    if task not in inputs:
+        return None  # e.g. no tensions in a clean case
+    data = inputs[task]
     out = rdir / "agreement"
     out.mkdir(exist_ok=True)
     # Keyed by the prompt, so repeats from an edited prompt never mix.
@@ -94,10 +103,39 @@ def report_final(per_run):
         print(f"tension status identical across repeats: {t_agree}/{t_total} tensions ({t_agree / t_total:.0%})")
 
 
+def report_tensions(per_run, majority):
+    single = binary = total = 0
+    group_full = group_binary = groups_total = 0
+    for answers in per_run.values():
+        statuses = [{t.get("id"): t.get("status") for t in a.get("tensions", [])} for a in answers]
+        for tid in set.intersection(*(set(s) for s in statuses)):
+            votes = [s[tid] for s in statuses]
+            total += 1
+            single += len(set(votes)) == 1
+            binary += len({v == "reconciled" for v in votes}) == 1
+        if majority > 1 and len(answers) >= 2 * majority:
+            groups = [judge.majority_tensions([{"parsed": a} for a in answers[i:i + majority]])
+                      for i in range(0, 2 * majority, majority)]
+            g = [{t["id"]: t["status"] for t in grp["tensions"]} for grp in groups]
+            for tid in set(g[0]) & set(g[1]):
+                groups_total += 1
+                group_full += g[0][tid] == g[1][tid]
+                group_binary += (g[0][tid] == "reconciled") == (g[1][tid] == "reconciled")
+    reps = len(next(iter(per_run.values())))
+    print(f"single judgings, identical in all {reps}: status {single}/{total} ({single / total:.0%}), "
+          f"reconciled-or-not {binary}/{total} ({binary / total:.0%})")
+    if groups_total:
+        print(f"two independent majority-of-{majority} scores agree: status {group_full}/{groups_total} "
+              f"({group_full / groups_total:.0%}), reconciled-or-not {group_binary}/{groups_total} "
+              f"({group_binary / groups_total:.0%})")
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--run-id", required=True)
-    p.add_argument("--task", default="contradictions", choices=["contradictions", "final"])
+    p.add_argument("--task", default="contradictions", choices=["contradictions", "final", "tensions"])
+    p.add_argument("--majority", type=int, default=1,
+                   help="tensions: also compare majority-of-k scores (needs --reps >= 2k)")
     p.add_argument("--reps", type=int, default=3)
     p.add_argument("--limit", type=int, default=None, help="only the first N finished runs")
     p.add_argument("--model", default="sonnet")
@@ -121,7 +159,12 @@ def main(argv=None):
     if not per_run:
         sys.exit("nothing to compare")
     print(f"\n{args.task}, {len(per_run)} runs x {args.reps} repeats")
-    (report_contradictions if args.task == "contradictions" else report_final)(per_run)
+    if args.task == "contradictions":
+        report_contradictions(per_run)
+    elif args.task == "tensions":
+        report_tensions(per_run, args.majority)
+    else:
+        report_final(per_run)
     return 0
 
 

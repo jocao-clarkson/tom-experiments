@@ -104,7 +104,7 @@ def run_metrics(rdir):
     out_of_lane = sum(1 for f in judged_findings.values() if f.get("out_of_lane"))
 
     pairs = contradiction_pairs(contradictions_output(judged), refs)
-    status = {t.get("id"): t.get("status") for t in final_out["tensions"] if t.get("id") in tension_ids}
+    status = {t.get("id"): t.get("status") for t in tensions_output(judged)["tensions"] if t.get("id") in tension_ids}
     resolved = sum(s == "reconciled" for s in status.values())
     clashing = sum(s == "unreconciled_conflict" for s in status.values())
     uncombined = sum(s == "unreconciled_compatible" for s in status.values())
@@ -168,6 +168,14 @@ def run_metrics(rdir):
         row["pred_recall"] = mean(r["peer_findings_predicted"] for r in pred_rows)
         row["pred_precision"] = mean(r["predictions_came_true"] for r in pred_rows)
     return row, pred_rows, judged
+
+
+def tensions_output(judged):
+    """The tension statuses. Older judge.json files have them inside `final`."""
+    outputs = judged["outputs"]
+    if "tensions" in outputs:
+        return outputs["tensions"]["parsed"]
+    return {"tensions": outputs["final"]["parsed"].get("tensions", [])}  # clean cases have none
 
 
 def contradictions_output(judged):
