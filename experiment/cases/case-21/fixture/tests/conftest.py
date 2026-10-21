@@ -49,5 +49,16 @@ def app(tmp_path, fake_session):
 
 
 @pytest.fixture
+def set_now(monkeypatch):
+    """Pin StockRepository.now() to a fixed ISO timestamp."""
+    from inventory.repository import StockRepository
+
+    def _set(value: str):
+        monkeypatch.setattr(StockRepository, "now", staticmethod(lambda: value))
+
+    return _set
+
+
+@pytest.fixture
 def client(app):
     return app.test_client()

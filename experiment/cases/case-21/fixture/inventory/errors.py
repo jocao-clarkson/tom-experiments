@@ -1,3 +1,5 @@
+import sqlite3
+
 from flask import Flask, jsonify
 
 
@@ -41,3 +43,7 @@ def register_error_handlers(app: Flask) -> None:
     @app.errorhandler(APIError)
     def _handle(err: APIError):
         return err.to_response()
+
+    @app.errorhandler(sqlite3.OperationalError)
+    def _handle_db(err: sqlite3.OperationalError):
+        return jsonify({"error": {"code": "unavailable", "message": "database busy"}}), 503

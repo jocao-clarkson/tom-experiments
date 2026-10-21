@@ -22,7 +22,7 @@ Add `Rotate` and `Revoke` handlers to `KeysAPI` in `internal/httpapi/keys.go`, r
 
 8. **Audit events.** Once the change has committed, insert `key.rotated` or `key.revoked` into `audit_events` with `a.Store.(store.Execer).Exec(...)`. Metadata carries the account id, both key ids, and the rotate response payload for traceability.
 
-9. **Error handling.** Unknown or foreign keys return 404, the checks in step 2 return 409, and store errors return 500 with the transaction rolled back. An audit insert error is logged at ERROR with the key id and the request still returns success, so an audit-table problem never blocks a customer who is rotating a leaked key mid-incident.
+9. **Error handling.** Unknown or foreign keys return 404, the checks in step 2 return 409, and store errors return 500 with the transaction rolled back. An audit insert error is logged at ERROR with the key id and also returns 500, so the caller knows to retry.
 
 10. **Routing.** Register both routes in `httpapi.Routes` (`internal/httpapi/router.go`) behind `Authenticate` and `RequireScope("keys:admin")`, next to the existing create route.
 

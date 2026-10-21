@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -31,7 +32,7 @@ func main() {
 	verifier := apikey.NewVerifier(st, clk, envDuration("KEY_CACHE_TTL", 10*time.Minute))
 	keys := &httpapi.KeysAPI{
 		Store: st,
-		Audit: audit.NewQueue(audit.NewSQL(st), 4096),
+		Audit: auditWriter(st, envOr("AUDIT_MODE", "sync")),
 		Clock: clk,
 		NewID: newID,
 	}
@@ -39,6 +40,18 @@ func main() {
 	addr := envOr("ADDR", ":8080")
 	log.Printf("iam listening on %s", addr)
 	log.Fatal(http.ListenAndServe(addr, httpapi.Routes(verifier, keys)))
+}
+
+func auditWriter(ex store.Execer, mode string) audit.Writer {
+	w := audit.NewSQL(ex)
+	if mode != "async" {
+		return w
+	}
+	size, err := strconv.Atoi(envOr("AUDIT_QUEUE_SIZE", "4096"))
+	if err != nil {
+		log.Fatalf("AUDIT_QUEUE_SIZE: %v", err)
+	}
+	return audit.NewQueue(w, size)
 }
 
 func newID() string {

@@ -18,14 +18,14 @@ Customers rotate service-account keys by creating a new key and deleting the old
 
 - **AC1.** After rotation with `grace_seconds: 3600`, both keys authenticate; 3601 seconds later only the new key does.
 - **AC2.** After revoke, the key is rejected on all instances within 5 seconds.
-- **AC3.** If the audit insert fails, rotate returns 500 and no new key exists.
+- **AC3.** If the audit write fails, rotate returns 500.
 - **AC4.** `grace_seconds: 604801` returns 400 `invalid_grace`; a caller without `keys:admin` gets 403.
 - **AC5.** Rotating the same key twice returns 409 the second time.
 - **AC6.** A test asserts that no audit event contains the plaintext.
 
 ## Non-functional constraints
 
-- Key verification runs on every API request (about 20k rps across 12 instances). It must not add a database round trip per request; p99 verification stays under 2 ms.
+- Key verification runs on every API request (about 20k rps across 12 instances). It must not add a database round trip per request; p99 verification stays under 2 ms. Key lookups against the database stay under 1,000 queries per second fleet-wide (about 30,000 active keys; the same cluster serves billing).
 - No new infrastructure (no Redis, no pub/sub).
 - New keys use the existing key format and hashing.
 

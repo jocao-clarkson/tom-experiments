@@ -6,7 +6,7 @@ We add a `reorders` table to the existing SQLite schema, a `reorder` method on `
 
 ## Steps
 
-1. **Schema.** In `inventory/repository.py`, extend `init_schema()` with a `reorders` table: `id INTEGER PRIMARY KEY`, `sku TEXT NOT NULL`, `quantity INTEGER NOT NULL`, `supplier_po_id TEXT NOT NULL`, `status TEXT NOT NULL DEFAULT 'pending'`, `created_at TEXT NOT NULL`, plus `UNIQUE (sku, status)`. Add `create_reorder(sku, quantity, po_id)`, which stamps `created_at` with `StockRepository.now()` and returns the new row, and `get_pending_reorder(sku)`, which selects the row with `status = 'pending' AND created_at > datetime('now', '-24 hours')` or returns `None`.
+1. **Schema.** In `inventory/repository.py`, extend `init_schema()` with a `reorders` table: `id INTEGER PRIMARY KEY`, `sku TEXT NOT NULL`, `quantity INTEGER NOT NULL`, `supplier_po_id TEXT NOT NULL`, `status TEXT NOT NULL DEFAULT 'pending'`, `created_at TEXT NOT NULL`, plus `UNIQUE (sku, status)`. Add `create_reorder(sku, quantity, po_id)`, which stamps `created_at` with `StockRepository.now()` and returns the new row, and `get_pending_reorder(sku)`, which selects the row with `status = 'pending'` that passes `within_hours("created_at", 24)`, or returns `None`.
 
 2. **Request schema.** In `inventory/routes.py`, add `REORDER_SCHEMA = {"quantity": {"type": int, "required": True, "min": 1, "max": 1000}}` next to `ADJUST_SCHEMA`, validated through `validate_payload` so unknown fields are rejected the same way as `/adjust`.
 
@@ -38,7 +38,6 @@ All new tests live in `tests/test_reorder.py`, use the existing `client` fixture
 - Stale pending: place a reorder, then inside `freeze_time` 25 hours later place another; assert 202 and two rows (AC6).
 - Unknown SKU returns 404 `not_found` (R2).
 
-The suite stays offline and runs in a few seconds.
 
 ## Rollout
 

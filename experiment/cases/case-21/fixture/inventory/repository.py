@@ -9,7 +9,7 @@ class StockRepository:
 
     @contextmanager
     def connect(self):
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=0.25)
         conn.row_factory = sqlite3.Row
         try:
             yield conn
@@ -45,6 +45,10 @@ class StockRepository:
     def adjust_on_hand(self, sku: str, delta: int) -> None:
         with self.connect() as conn:
             conn.execute("UPDATE items SET on_hand = on_hand + ? WHERE sku = ?", (delta, sku))
+
+    @staticmethod
+    def within_hours(column: str, hours: int) -> str:
+        return f"{column} > datetime('now', '-{int(hours)} hours')"
 
     @staticmethod
     def now() -> str:
