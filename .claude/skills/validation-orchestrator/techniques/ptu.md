@@ -8,12 +8,19 @@ Run step 2 of the skill with the standard brief, plus these lines at the end of 
 
 ```
 PREDICT PEERS: yes
+The five lenses reviewing this plan in parallel are:
+- lens-spec-coverage: every requirement and acceptance criterion maps to a plan step; nothing exceeds scope
+- lens-consistency: ambiguities, contradictions, and unstated assumptions between spec and plan
+- lens-architecture: fit with existing codebase structure and conventions, reuse, sensible ordering
+- lens-risk: security, data, failure-mode, and edge-case risks the plan doesn't address
+- lens-tests: acceptance criteria are testable and the plan has a test strategy
 After your findings, include the PREDICTIONS block from your output format. For each of the
-other four lenses, predict what it will flag in this plan, and where you expect its findings
-to conflict with yours. Make your own findings first, independently of the predictions.
+other four lenses above, by exactly that name, predict what it will flag in this plan, and
+where you expect its findings to conflict with yours. Make your own findings first,
+independently of the predictions.
 ```
 
-Keep every lens's full output verbatim, including the PREDICTIONS block.
+Copy the peer list exactly as written. Keep every lens's full output verbatim, including the PREDICTIONS block.
 
 ## Reveal (orchestrator)
 
