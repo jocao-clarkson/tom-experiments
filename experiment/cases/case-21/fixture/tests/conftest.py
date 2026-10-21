@@ -38,7 +38,7 @@ def fake_session():
 
 @pytest.fixture
 def app(tmp_path, fake_session):
-    supplier = SupplierClient("https://supplier.test", "k", session=fake_session, backoff=0)
+    supplier = SupplierClient("https://supplier.test", "k", session=fake_session)
     app = create_app(str(tmp_path / "test.db"), supplier=supplier)
     repo = app.extensions["inventory_service"].repo
     with repo.connect() as conn:

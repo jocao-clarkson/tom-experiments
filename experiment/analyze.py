@@ -96,7 +96,7 @@ def run_metrics(rdir):
         found |= set(f.get("matches_defects") or []) & defect_ids
     out_of_lane = sum(1 for f in judged_findings.values() if f.get("out_of_lane"))
 
-    pairs = contradiction_pairs(final_out, refs)
+    pairs = contradiction_pairs(contradictions_output(judged), refs)
     resolved = sum(
         1 for t in final_out["tensions"] if t.get("id") in tension_ids and t.get("status") == "reconciled"
     )
@@ -153,6 +153,12 @@ def run_metrics(rdir):
         row["pred_recall"] = mean(r["peer_findings_predicted"] for r in pred_rows)
         row["pred_precision"] = mean(r["predictions_came_true"] for r in pred_rows)
     return row, pred_rows, judged
+
+
+def contradictions_output(judged):
+    """The contradictions answer. Older judge.json files have it inside `final`."""
+    outputs = judged["outputs"]
+    return (outputs.get("contradictions") or outputs["final"])["parsed"]
 
 
 def contradiction_pairs(final_out, refs):
@@ -338,7 +344,7 @@ def cmd_labels(args):
             continue
         judged = json.loads(jpath.read_text(encoding="utf-8"))
         findings = {(l, f["id"]): f for l, fs in judged["inputs"]["final"]["findings"].items() for f in fs}
-        pairs = contradiction_pairs(judged["outputs"]["final"]["parsed"], set(findings))
+        pairs = contradiction_pairs(contradictions_output(judged), set(findings))
         for a, b in itertools.combinations(sorted(findings), 2):
             if a[0] == b[0]:
                 continue

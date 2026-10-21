@@ -5,51 +5,58 @@
   "defects": [
     {
       "id": "D1",
-      "description": "Key hashing is implemented ad hoc with hashlib.sha256 in routes/api_keys.py, and principal.py imports it from the routes module. This bypasses security/hashing.py, which the codebase designates as the single place for stored-secret hashing, and makes the auth layer depend on a route module.",
-      "location": "plan.md steps 2 and 7; fixture/authsvc/security/hashing.py",
+      "description": "Key hashing is implemented ad hoc as _key_hash (HMAC-SHA256) in the route module authsvc/routes/api_keys.py, and principal.py imports _key_hash from that route module. This bypasses authsvc/security/hashing.py, whose docstring makes it the single place all stored secrets are hashed (recovery.py follows it), and makes the auth layer depend on a routes module.",
+      "location": "plan.md steps 2 and 7; fixture/authsvc/security/hashing.py; fixture/authsvc/routes/recovery.py",
       "expected_lenses": ["lens-architecture"],
       "severity": "major"
     },
     {
       "id": "D2",
-      "description": "Verification compares hashes with '==' (not constant-time) and uses an unkeyed SHA-256, although settings already provides a secret_pepper for keyed hashing. Anyone who reads the DB can check candidate keys offline, and the comparison leaks timing.",
-      "location": "plan.md steps 2 and 7; fixture/authsvc/settings.py",
+      "description": "The key hash is an HMAC keyed with settings.jwt_secret, reusing the JWT signing key for a second purpose. Rotating JWT_SECRET silently invalidates every stored API key hash, and a JWT key leak also enables offline checking of key hashes. settings.py already has a dedicated secret_pepper for keyed secret hashing that the plan does not use.",
+      "location": "plan.md step 2; fixture/authsvc/settings.py (jwt_secret, secret_pepper)",
       "expected_lenses": ["lens-risk"],
-      "severity": "minor"
+      "severity": "major"
     },
     {
       "id": "D3",
-      "description": "The 5-minute in-process lookup cache, invalidated only on the instance that handled the DELETE, means a revoked key keeps working on the other instances for up to 5 minutes. This contradicts R4/AC3 (rejected within 60 s on every instance).",
-      "location": "plan.md step 8; spec.md R4, AC3",
+      "description": "The lookup cache TTL is settings.cache_ttl_seconds, whose default (CACHE_TTL_SECONDS) in settings.py is 300 s, and revocation only pops the entry on the instance that served the DELETE. A revoked key therefore keeps authenticating on the other instances for up to 5 minutes, violating R4/AC3 (401 within 60 s on every instance).",
+      "location": "plan.md steps 6 and 8; fixture/authsvc/settings.py cache_ttl_seconds default; spec.md R4, AC3",
       "expected_lenses": ["lens-consistency"],
       "severity": "blocker"
     },
     {
       "id": "D4",
-      "description": "last_used_at is updated synchronously on every authenticated request. At 2k rps this creates row-lock contention and latency on hot keys, and it contradicts R5/AC5 (at most once per minute per key) and the no-lock-contention constraint.",
-      "location": "plan.md step 9; spec.md R5, AC5, non-functional constraints",
-      "expected_lenses": ["lens-risk", "lens-spec-coverage"],
-      "severity": "major"
+      "description": "The plan adds the cachetools dependency and a new TTLCache instead of reusing the existing in-process cache helper authsvc/cache.py TTLMemo (already used by orgs.is_active, which the plan's own step 7 calls).",
+      "location": "plan.md step 8 and rollout notes; fixture/authsvc/cache.py; fixture/authsvc/orgs.py",
+      "expected_lenses": ["lens-architecture"],
+      "severity": "minor"
     },
     {
       "id": "D5",
-      "description": "The audit metadata embeds the whole create response, which carries the secret under the field name 'api_key'. audit.scrub() only drops password/secret/token/recovery_code, so the plaintext key is persisted in audit_events, violating AC4 and the never-log-secrets constraint.",
-      "location": "plan.md steps 3-4; fixture/authsvc/audit.py SENSITIVE_KEYS",
+      "description": "The existing RequestLogMiddleware (authsvc/reqlog.py) logs the Authorization header at DEBUG through _redact_bearer, which only masks the part after the last '.' (the JWT signature) and returns dotless values unchanged. sk_live_ keys contain no '.', so the full secret is logged at DEBUG, and the rollout runs a canary at LOG_LEVEL=DEBUG. The plan never updates the redaction, violating AC4 and the never-log-secrets constraint.",
+      "location": "plan.md rollout notes; fixture/authsvc/reqlog.py _redact_bearer; fixture/authsvc/app.py",
       "expected_lenses": ["lens-risk"],
       "severity": "blocker"
     },
     {
       "id": "D6",
-      "description": "Step 6 adds a key rotation endpoint. Key rotation is explicitly out of scope.",
-      "location": "plan.md step 6; spec.md out of scope",
-      "expected_lenses": ["lens-spec-coverage"],
-      "severity": "minor"
+      "description": "Audit metadata for api_key.created and api_key.revoked is nested under the field name \"api_key\", which is in audit.SENSITIVE_KEYS, so scrub() drops the whole object and the audit rows persist empty metadata with no key id, name or scopes. R6 is not met.",
+      "location": "plan.md steps 4 and 6; fixture/authsvc/audit.py SENSITIVE_KEYS/scrub; spec.md R6",
+      "expected_lenses": ["lens-consistency", "lens-spec-coverage"],
+      "severity": "major"
     },
     {
       "id": "D7",
-      "description": "There are no tests for AC3 (revocation honoured within 60 s across instances), AC5 (write throttling), or AC4 (no secret in DB, audit or logs). The suite only covers single-instance, happy-path behaviour.",
+      "description": "The test strategy has no test for AC3 (revoked key rejected within 61 s on every instance; the revoke test only checks the same process), AC5 (1,000 requests in a minute cause at most one last_used_at write), or AC4 (no secret in DB, audit table or logs). The audit test checks action/actor/target but not metadata contents.",
       "location": "plan.md test strategy",
       "expected_lenses": ["lens-tests"],
+      "severity": "major"
+    },
+    {
+      "id": "D8",
+      "description": "The last_used_at UPDATE condition `last_used_at < now() - interval '1 minute'` is NULL (not true) for a key that has never been used, because last_used_at is nullable with no default (step 1). The first write never happens, so last_used_at stays NULL forever and R5 is never satisfied. Needs `last_used_at IS NULL OR ...`.",
+      "location": "plan.md steps 1 and 9; spec.md R5",
+      "expected_lenses": ["lens-consistency", "lens-risk"],
       "severity": "major"
     }
   ],
@@ -58,20 +65,20 @@
       "id": "T1",
       "lenses": ["lens-architecture", "lens-risk"],
       "related_defects": ["D1", "D2"],
-      "description": "Architecture's natural fix is to route key hashing through the existing hash_secret/verify_secret, which the hashing module says all stored secrets must use. Those use argon2 tuned to about 50 ms per call, and verifying on every request at 2k rps would blow the 5 ms p95 budget and make random sk_live_ tokens a cheap CPU DoS. Risk's natural fix keeps a fast hash but hardens it with a pepper and a constant-time compare, which goes against the 'one hashing path' convention. The conflict only shows up once you read the argon2 parameters in the fixture.",
-      "lens_a_fix": "Delete the inline sha256 helper and use security.hashing.hash_secret / verify_secret for API keys, like every other stored secret.",
-      "lens_b_fix": "Keep a fast hash for high-entropy keys, but use HMAC-SHA256 with settings.secret_pepper and hmac.compare_digest.",
-      "reconciliation": "Add hash_api_key/verify_api_key (HMAC-SHA256 with the pepper, compare_digest) to security/hashing.py next to the argon2 helpers, with a docstring explaining why high-entropy keys use a fast keyed hash. Both principal.py and the routes import from there; argon2 stays for passwords and recovery codes.",
+      "description": "Architecture's natural fix is to route API key hashing through security/hashing.py's hash_secret/verify_secret, which the module docstring says every stored secret must use. Those are argon2 with parameters from settings.argon2_params() (time_cost 3, 64 MiB, parallelism 2), tens of milliseconds and 64 MiB per call. Verifying on every request at about 333 rps per instance blows the spec's 5 ms p95 budget and turns random sk_live_ tokens into a cheap CPU/memory DoS. Risk's natural fix keeps a fast HMAC but switches the key to secret_pepper, which leaves hashing outside the one-hashing-module convention. The argon2 cost is only visible in settings.py plus the spec NFR, and the convention only in hashing.py.",
+      "lens_a_fix": "Delete the inline _key_hash and hash/verify API keys with security.hashing.hash_secret / verify_secret like every other stored secret.",
+      "lens_b_fix": "Keep a fast HMAC-SHA256 for the high-entropy keys but key it with settings.secret_pepper instead of jwt_secret (with compare_digest).",
+      "reconciliation": "Add a fast keyed helper (e.g. hash_api_key / verify_api_key: HMAC-SHA256 with settings.secret_pepper, hmac.compare_digest) to security/hashing.py next to the argon2 functions, documenting that high-entropy machine keys use a keyed fast hash because argon2's per-call cost can't meet the 5 ms per-request budget. Both routes/api_keys.py and principal.py import it from security/hashing.py (no principal->routes import). Argon2 stays for passwords and recovery codes.",
       "subtle": true
     },
     {
       "id": "T2",
-      "lenses": ["lens-consistency", "lens-risk"],
+      "lenses": ["lens-consistency", "lens-architecture"],
       "related_defects": ["D3", "D4"],
-      "description": "Consistency's fix for the revocation window is to shorten or remove the in-process cache so revocation takes effect within 60 s. Risk's natural fix for the per-request last_used_at UPDATE is to throttle writes using the cache entry, writing only when the entry is refreshed, which depends on long-lived cache entries. With 6 instances, a cache-based throttle also allows several writes per minute per key, so AC5 still fails. The two fixes pull the cache TTL in opposite directions.",
-      "lens_a_fix": "Cut the lookup cache TTL to 60 s or less (or drop it) so revoked keys are rejected everywhere within 60 s.",
-      "lens_b_fix": "Throttle last_used_at by only writing when the per-instance cache entry is created or refreshed, and move the write off the request path.",
-      "reconciliation": "Decouple the two. Cache lookups for 30 s or less (well inside the 60 s window, cheap at 2k rps). Throttle last_used_at in the database with a conditional, asynchronous UPDATE ... WHERE id = %s AND (last_used_at IS NULL OR last_used_at < now() - interval '1 minute'), which caps writes at about one per minute per key across all instances without relying on cache lifetime.",
+      "description": "Consistency's natural fix for the revocation window is to cap the key cache TTL at 60 s or less instead of the 300 s CACHE_TTL_SECONDS default. Architecture's natural fix is to drop cachetools and reuse authsvc/cache.py TTLMemo. Combined as written (TTLMemo(ttl=30)), it fails: TTLMemo defaults to refresh_on_hit=True, so every cache hit pushes the entry's expiry forward. A key in continuous use (exactly the CI keys this feature is for) never expires on instances that didn't serve the DELETE, so a revoked hot key keeps working indefinitely and AC3 still fails. The sliding-expiry default is only visible in cache.py; the 60 s cross-instance bound is only in the spec plus the settings default.",
+      "lens_a_fix": "Set the API key cache TTL to 60 s or less (e.g. 30 s) instead of the shared 300 s cache_ttl_seconds default.",
+      "lens_b_fix": "Replace the new cachetools TTLCache (and the new dependency) with the existing authsvc.cache.TTLMemo.",
+      "reconciliation": "Reuse TTLMemo but construct it with refresh_on_hit=False (absolute expiry from load time) and a dedicated TTL of 30 s or less, not the shared CACHE_TTL_SECONDS. Keep the local evict on DELETE, drop cachetools, and add a test with an injected clock and two memo instances (two simulated app instances) showing a continuously used revoked key is rejected within 60 s.",
       "subtle": true
     }
   ]

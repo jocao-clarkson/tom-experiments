@@ -2,6 +2,7 @@ import pytest
 from fastapi import HTTPException
 
 from authsvc.audit import scrub
+from authsvc.cache import TTLMemo
 from authsvc.principal import Principal
 from authsvc.security.hashing import hash_secret, verify_secret
 
@@ -34,3 +35,15 @@ def test_only_org_admin_users_pass_admin_check():
     sa = Principal(subject="sa_1", org_id="o1", kind="service_account", role="admin")
     with pytest.raises(HTTPException):
         sa.require_org_admin("o1")
+
+
+def test_memo_expires_and_evicts():
+    now = [0.0]
+    memo = TTLMemo(ttl=10, clock=lambda: now[0])
+    loads = []
+    load = lambda: loads.append(1) or len(loads)
+    assert memo.get_or_load("a", load) == 1
+    now[0] = 11
+    assert memo.get_or_load("a", load) == 2
+    memo.evict("a")
+    assert memo.get_or_load("a", load) == 3

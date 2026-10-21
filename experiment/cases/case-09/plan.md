@@ -2,42 +2,45 @@
 
 ## Overview
 
-`rollback` is a new commander subcommand built like `deploy`: a `makeRollbackCommand(deps)` factory taking the same `Deps` (API client and streams), registered in `src/cli.ts`. The command resolves the target release, confirms when needed, starts the rollback, and polls until it reaches a terminal status. The output and exit handling reuse `src/lib/output.ts`.
+`rollback` is a new commander subcommand built like `deploy`: a `makeRollbackCommand(deps)` factory over the shared `Deps` (API client, confirm, streams), registered in `src/cli.ts`. The command resolves the target release, confirms in production, starts the rollback, and polls it until it reaches a terminal status. Output and exit codes go through `src/lib/output.ts`.
 
 ## Steps
 
-1. **Command skeleton** (`src/commands/rollback.ts`, new). `makeRollbackCommand(deps: () => Deps)` with `<service>`, `--to <release-id>`, `--env <env>` (default `staging`), `-y, --yes` and `--json`. Import the `Deps` type from `deploy.ts` so both commands share one shape.
+1. **Command skeleton** (`src/commands/rollback.ts`, new). `makeRollbackCommand(deps)` with `<service>`, `--to <release-id>`, `--env <env>` (default `staging`), `-y, --yes`, `--json` and `--token <token>`. `Deps` is imported from `deploy.ts` so both commands share one shape.
 
-2. **Resolve target** (`src/commands/rollback.ts`). If `--to` is given, use it. Otherwise call `api.get("/services/:svc/releases?env=...&status=succeeded")` and take the second entry. The first is the current release, so the second is the previous successful one (R1, AC1). If there is no second entry, print `no earlier successful release` and exit 1.
+2. **Resolve target** (`src/commands/rollback.ts`). With `--to`, use it. Otherwise call `d.api.get("/services/:svc/releases?env=<env>&status=succeeded")` and take the second entry: the list is newest first and its first entry is the current release (R1, AC1). With no second entry, print `no earlier successful release` and exit 1.
 
-3. **Confirmation** (`src/commands/rollback.ts`). For `production` without `--yes`, prompt `Roll back <svc> in production to <release>? [y/N]` using a small `askYesNo()` helper built on `readline.createInterface({ input: process.stdin, output: process.stderr })`. The rollback prompt shows both release ids, which the shared helper's fixed question format does not fit well.
+3. **Confirmation** (`src/commands/rollback.ts`). In `production` without `--yes`: when `process.stdin.isTTY` is false, print `confirmation required; re-run with --yes` and exit `ExitCode.ABORTED` before any rollbacks call (R2, AC2). Otherwise call `d.confirm(\`Roll back ${svc} in production to ${release}?\`)`.
 
-4. **Abort handling** (`src/commands/rollback.ts`). If the answer is not `y`/`yes`, call `handleAbort(d)` and set `process.exitCode` to its return value, exactly as `deploy` does, so that both commands behave the same when declined.
+4. **Declined prompt** (`src/commands/rollback.ts`). When `d.confirm` resolves false, set `process.exitCode = handleAbort(d)` and return. This is the path `deploy` takes, so both commands print `Aborted.` the same way.
 
-5. **Start rollback** (`src/commands/rollback.ts`). `api.post("/services/:svc/rollbacks", { env, releaseId })`. Since `ApiClient` never retries POST, there is no risk of starting two rollbacks.
+5. **Start rollback** (`src/commands/rollback.ts`). `const { rollbackId, fromRelease, toRelease } = await d.api.post("/services/:svc/rollbacks", { env, releaseId })`. These three values feed the poll loop and the final result.
 
-6. **Polling** (`src/commands/rollback.ts`). Loop on `api.get("/rollbacks/:id")` with a 5-second `setTimeout` between calls until `status` is `succeeded` or `failed`. GETs already get the client's built-in retry for transient errors (AC6).
+6. **Polling** (`src/commands/rollback.ts`). Loop on `d.api.get(\`/rollbacks/${rollbackId}\`)` with a 5-second `setTimeout` between calls until `status` is `succeeded` or `failed`. The deadline is 10 minutes of wall-clock time from the POST. Each poll writes `rollback <id>: <status>` to `d.stdout` so on-call can follow progress. Transient errors on these GETs are covered by the client's built-in GET retry (AC6).
 
-7. **Exit codes** (`src/lib/output.ts`). Add `TIMEOUT: 4` to `ExitCode` for the timeout path. Succeeded maps to `OK`, and failed or an `ApiError` maps to `FAILURE`.
+7. **Timeout** (`src/commands/rollback.ts`). At the deadline, print `timed out waiting; rollback <id> may still be in progress` to stderr and exit `ExitCode.TIMEOUT` (R5, AC3).
 
-8. **JSON output** (`src/commands/rollback.ts`). Use `printResult(d, json, { rollbackId, service, env, fromRelease, toRelease, status }, human)` (R4, AC4).
+8. **Exit codes** (`src/lib/output.ts`). Add `ABORTED: 3` and `TIMEOUT: 4` to `ExitCode`. `succeeded` maps to `OK`; `failed` or an `ApiError` maps to `FAILURE`.
 
-9. **Verbose diagnostics** (`src/commands/rollback.ts`). When `--verbose` is set, emit `debug(\`argv: ${process.argv.slice(2).join(" ")}\`)` and `debug(\`config: ${JSON.stringify(loadConfig())}\`)` at start-up, so that CI logs show exactly how the command was invoked and which API it is targeting.
+9. **JSON output** (`src/commands/rollback.ts`). `printResult(d, json, { rollbackId, service, env, fromRelease, toRelease, status }, human)` (R4, AC4).
 
-10. **Token source** (`src/cli.ts`). No `--token` flag is added: `DEPLOYER_TOKEN` already has precedence over `~/.deployerrc` in `loadConfig`, and every CI system we support can set environment variables at the job level.
+10. **Token override** (`src/lib/config.ts`, `src/cli.ts`). `loadConfig` gains an optional `overrides: Partial<Config>` parameter applied ahead of the environment and the rc file, so an explicit token wins over `DEPLOYER_TOKEN` (R6, AC5). The `deps` factory in `cli.ts` accepts the same overrides and forwards them; `rollback` calls `deps({ token: opts.token })`, and `deploy` keeps calling `deps()`.
 
-11. **Register** (`src/cli.ts`). `program.addCommand(makeRollbackCommand(deps))`.
+11. **Verbose diagnostics** (`src/commands/rollback.ts`). With `--verbose`, emit `debug("rollback invocation", { args: process.argv.slice(2), apiUrl })` through the shared logger, so CI logs record how the command was called and which API it targeted.
+
+12. **Register** (`src/cli.ts`). `program.addCommand(makeRollbackCommand(deps))`.
 
 ## Test strategy
 
-- `tests/rollback.test.ts`, in the style of `deploy.test.ts` with mocked `api` and captured streams:
+- `tests/rollback.test.ts`, in the style of `deploy.test.ts`, with an injected `Deps` (mocked `api` and `confirm`) and captured streams:
   - target resolution: `--to` wins; otherwise the second succeeded release; no earlier release gives exit 1 (AC1);
-  - `--yes` in production skips the prompt and calls `post`;
+  - `--yes` in production skips `confirm` and calls `post`;
+  - declined prompt: `confirm` resolves false, `post` is never called and `Aborted.` is printed;
   - polling stops on `succeeded` (exit 0) and on `failed` (exit 1);
-  - `--json` output parses and has all fields (AC4).
-- Use `vi.useFakeTimers()` for the polling tests so that they don't wait the real 5 seconds.
-- A declined prompt test stubs `askYesNo` through a module mock and asserts that `post` is never called.
-- Human-readable output is checked with a snapshot of the success and failure messages, so wording changes are deliberate.
+  - `--json` output parses and has every R4 field (AC4).
+- `tests/config.test.ts`: `overrides.token` wins over both `DEPLOYER_TOKEN` and the rc file, and `loadConfig` still throws when no source provides a token.
+- Polling tests use `vi.useFakeTimers()` and advance time, so they don't wait the real 5 seconds and the suite stays well inside the 60-second budget.
+- Human-readable output is checked with snapshots of the success and failure messages, so wording changes are deliberate.
 
 ## Rollout and notes
 

@@ -5,57 +5,57 @@
   "defects": [
     {
       "id": "D1",
-      "description": "Plan writes its own readline-based askYesNo() instead of using the existing lib/prompt.confirm through the injected deps.confirm that deploy uses. The prompt has to be module-mocked in tests instead of injected, and the codebase's prompt behaviour (including its non-TTY handling) is duplicated.",
-      "location": "plan.md step 3; fixture/src/lib/prompt.ts; fixture/src/commands/deploy.ts",
-      "expected_lenses": ["lens-architecture"],
+      "description": "Step 3 reads process.stdin.isTTY directly inside rollback.ts instead of going through the injected Deps. deploy leaves TTY handling to deps.confirm (lib/prompt.ts confirm already returns false on a non-TTY stdin), and tests inject confirm. Under vitest stdin is not a TTY, so the planned declined-prompt test hits the non-TTY branch ('confirmation required', exit 3) and never reaches d.confirm; the interactive path cannot be unit-tested without touching the real process.stdin.",
+      "location": "plan.md step 3, test strategy; fixture/src/commands/deploy.ts; fixture/src/lib/prompt.ts; fixture/tests/deploy.test.ts",
+      "expected_lenses": ["lens-architecture", "lens-tests"],
       "severity": "major"
     },
     {
       "id": "D2",
-      "description": "askYesNo has no TTY check, so in CI (non-TTY stdin) it blocks waiting on stdin, or reads EOF as a decline. It never produces the required 'confirmation required; re-run with --yes' path, so R2/AC2 fail and a pipeline can hang.",
-      "location": "plan.md step 3; spec.md R2, AC2",
-      "expected_lenses": ["lens-risk"],
-      "severity": "major"
-    },
-    {
-      "id": "D3",
-      "description": "Declined or missing confirmation goes through handleAbort, which returns ExitCode.FAILURE (1). R2 and R5 require exit code 3. The plan justifies this as consistency with deploy, but the spec overrides it here.",
-      "location": "plan.md step 4; fixture/src/lib/output.ts handleAbort; spec.md R2, R5",
+      "description": "A declined prompt sets process.exitCode = handleAbort(d). In output.ts handleAbort returns ExitCode.FAILURE (1), so declining exits 1, but R2/R5 require exit 3 for a declined prompt. The plan adds ABORTED: 3 (step 8) but only uses it on the non-TTY path.",
+      "location": "plan.md steps 4 and 8; fixture/src/lib/output.ts handleAbort; spec.md R2, R5",
       "expected_lenses": ["lens-consistency"],
       "severity": "major"
     },
     {
-      "id": "D4",
-      "description": "The poll loop has no overall 10-minute deadline. TIMEOUT: 4 is added but nothing ever produces it, so R3's limit, R5's exit 4 and AC3 (message with the rollback id) are not implemented, and the command can hang indefinitely.",
-      "location": "plan.md steps 6-7; spec.md R3, R5, AC3",
-      "expected_lenses": ["lens-spec-coverage", "lens-risk"],
+      "id": "D3",
+      "description": "AC6 is delegated to ApiClient's built-in GET retry, but RETRY_DELAYS_MS is [500, 1500, 4000]: four attempts and about 6 s of backoff (plus up to 15 s per-attempt timeout), then it throws. Per step 8 that ApiError/network error exits 1, so any network blip longer than a few seconds ends the command with 'failed/API error' while the rollback continues server-side and well before the 10-minute limit. Violates AC6 and misreports the outcome.",
+      "location": "plan.md steps 6 and 8; fixture/src/lib/apiClient.ts RETRY_DELAYS_MS; spec.md AC6",
+      "expected_lenses": ["lens-risk"],
       "severity": "major"
     },
     {
+      "id": "D4",
+      "description": "Step 5 destructures rollbackId from the POST /services/:svc/rollbacks response, but R3 says the response is { id, fromRelease, toRelease } (rollbackId is only the R4 output field name). rollbackId is undefined, so polling requests GET /rollbacks/undefined (404, exit 1), and the timeout message and JSON output carry no id.",
+      "location": "plan.md steps 5, 6, 9; spec.md R3, R4",
+      "expected_lenses": ["lens-consistency"],
+      "severity": "blocker"
+    },
+    {
       "id": "D5",
-      "description": "Transient poll errors are delegated to ApiClient's GET retries, which give up after about 6 s and throw. The plan then exits 1 ('API error') while the rollback continues server-side. That contradicts AC6 and misreports the outcome.",
-      "location": "plan.md step 6; fixture/src/lib/apiClient.ts RETRY_DELAYS_MS; spec.md AC6",
-      "expected_lenses": ["lens-risk"],
+      "description": "--token is declared on the rollback subcommand, not as a global program option as R6 requires. AC5's invocation 'deployer --token abc rollback web --yes' puts the option before the subcommand; the root program in cli.ts has no --token option, so commander does not route it to rollback and the run fails as a usage error/help instead of authenticating with abc. deploy also gets no --token.",
+      "location": "plan.md steps 1 and 10; fixture/src/cli.ts; spec.md R6, AC5",
+      "expected_lenses": ["lens-spec-coverage", "lens-consistency"],
       "severity": "major"
     },
     {
       "id": "D6",
-      "description": "R6/AC5 (a global --token option overriding the configured token) is deliberately dropped in step 10 without the spec's agreement.",
-      "location": "plan.md step 10; spec.md R6, AC5",
-      "expected_lenses": ["lens-spec-coverage"],
-      "severity": "major"
-    },
-    {
-      "id": "D7",
-      "description": "Verbose diagnostics interpolate raw argv and JSON.stringify(loadConfig()), which includes the token, into the debug message string. log.ts only redacts named fields, so the token is printed to CI logs, violating the 'tokens never printed, including --verbose' constraint.",
-      "location": "plan.md step 9; fixture/src/lib/log.ts",
+      "description": "Verbose diagnostics log debug('rollback invocation', { args: process.argv.slice(2), ... }). log.ts redact() only replaces top-level keys named token/authorization/password; the 'args' array is printed as-is, so a --token value from argv is written to stderr/CI logs, violating 'tokens must never be printed, including with --verbose'.",
+      "location": "plan.md step 11; fixture/src/lib/log.ts redact; spec.md non-functional constraints",
       "expected_lenses": ["lens-risk"],
       "severity": "blocker"
     },
     {
+      "id": "D7",
+      "description": "Each poll writes 'rollback <id>: <status>' to d.stdout, including with --json. R4 requires --json to print exactly one line (the JSON object) to stdout, so stdout no longer parses as JSON (AC4) and the planned AC4 test would fail. Progress belongs on stderr or should be suppressed under --json.",
+      "location": "plan.md steps 6 and 9; fixture/src/lib/output.ts printResult; spec.md R4, AC4",
+      "expected_lenses": ["lens-consistency", "lens-tests"],
+      "severity": "major"
+    },
+    {
       "id": "D8",
-      "description": "There are no tests for AC2 (non-TTY gives exit 3 and no POST), AC3 (timeout gives exit 4 with id), AC5 (--token override) or AC6 (transient poll errors). The declined-prompt exit code is never asserted.",
-      "location": "plan.md test strategy",
+      "description": "Test strategy has no tests for AC2 (non-TTY production without --yes exits 3 without POST), AC3 (still in_progress after 10 minutes exits 4 and prints the id), AC6 (transient error while polling does not end the command), or the CLI-level AC5 invocation (config.test.ts only tests loadConfig overrides). The declined-prompt test never asserts exit code 3.",
+      "location": "plan.md test strategy; spec.md AC2, AC3, AC5, AC6",
       "expected_lenses": ["lens-tests"],
       "severity": "major"
     }
@@ -64,22 +64,22 @@
     {
       "id": "T1",
       "lenses": ["lens-architecture", "lens-consistency"],
-      "related_defects": ["D1", "D3"],
-      "description": "Architecture's natural fix is to follow deploy exactly: use deps.confirm and handleAbort. In the fixture, handleAbort hardcodes ExitCode.FAILURE (1), and confirm() returns false on a non-TTY without saying why. A faithful reuse therefore keeps exit 1 and cannot tell 'declined' from 'not interactive', so the R2 message is lost. Consistency's fix (exit 3, distinct message) means not reusing those helpers as they are. Changing handleAbort globally would alter deploy's exit code, which is out of scope.",
-      "lens_a_fix": "Replace askYesNo with deps.confirm and reuse handleAbort, mirroring deploy.ts.",
-      "lens_b_fix": "Exit with code 3 on decline or missing confirmation, and print 'confirmation required; re-run with --yes' when stdin is not interactive.",
-      "reconciliation": "Reuse deps.confirm for the prompt, but check stdin.isTTY in the command first to emit the R2 message. Add ExitCode.ABORTED = 3 and have handleAbort take an optional exit code (default FAILURE), so that deploy's behaviour is unchanged and rollback passes ABORTED.",
+      "related_defects": ["D1", "D2"],
+      "description": "Architecture's evidence is in deploy.ts/prompt.ts/deploy.test.ts: TTY handling belongs to the injected confirm, which already returns false on a non-TTY. Its natural fix (drop the direct isTTY check and rely on d.confirm like deploy) merges 'not interactive' into the decline path, so the R2 'confirmation required; re-run with --yes' message can no longer be produced. Consistency's evidence is spec R2/R5 vs handleAbort's return value in output.ts. Its natural fix (make handleAbort return ExitCode.ABORTED) changes the shared helper, so deploy's decline would exit 3, breaking deploy.test.ts (expects 1) and the out-of-scope rule on deploy behaviour.",
+      "lens_a_fix": "Remove the process.stdin.isTTY check from rollback.ts and use only the injected d.confirm, treating false as a decline via handleAbort, mirroring deploy.",
+      "lens_b_fix": "Exit 3 on a declined prompt by changing handleAbort to return ExitCode.ABORTED (and keep the R2 message for non-TTY).",
+      "reconciliation": "Add an injectable interactivity signal to Deps (e.g. interactive: boolean, wired in cli.ts from process.stdin.isTTY; tests set it). rollback checks d.interactive first and prints the R2 message with ExitCode.ABORTED, otherwise calls d.confirm; on decline it prints 'Aborted.' and sets ExitCode.ABORTED itself (or handleAbort takes an optional code defaulting to FAILURE), leaving handleAbort's default and deploy's exit 1 unchanged. Tests cover non-interactive, declined and accepted paths with exit codes.",
       "subtle": true
     },
     {
       "id": "T2",
-      "lenses": ["lens-spec-coverage", "lens-risk"],
-      "related_defects": ["D6", "D7"],
-      "description": "Coverage's fix is to add the required global --token flag. Risk sees that tokens on the command line are exposed in process listings and shell history, and with the plan's verbose argv/config echo they would be printed straight into CI logs. Risk would naturally push to keep tokens env-only, which removes the flag coverage is insisting on.",
-      "lens_a_fix": "Add a global --token <token> option in cli.ts that overrides loadConfig's token for the invocation.",
-      "lens_b_fix": "Do not accept tokens via argv; keep DEPLOYER_TOKEN as the only CI path, and stop echoing argv/config in verbose output.",
-      "reconciliation": "Implement --token as the spec requires, but never echo raw argv or config. Route verbose output through debug() fields so the token key is redacted, document env vars as the preferred CI mechanism, and raise the process-list exposure with the spec owner, for example suggesting --token-file or stdin as a follow-up.",
-      "subtle": false
+      "lenses": ["lens-risk", "lens-consistency"],
+      "related_defects": ["D3", "D4"],
+      "description": "Risk's evidence is RETRY_DELAYS_MS in apiClient.ts: the client gives up after ~6 s, so AC6 is not met. Its natural fix is to catch errors around each poll GET and keep polling until the 10-minute deadline. Consistency's evidence is the response field name in spec R3 (id, not rollbackId) and R5's 'API returned an error -> exit 1'. With a catch-all loop, the 404 from GET /rollbacks/undefined (or a 401/403 mid-poll) is swallowed for ten minutes and ends as exit 4 'may still be in progress', contradicting R5 and hiding the field bug; keeping step 8's 'any ApiError exits 1' alone leaves transient blips ending the command.",
+      "lens_a_fix": "Wrap each poll request in try/catch and continue polling every 5 s on any error until the wall-clock deadline, then exit 4.",
+      "lens_b_fix": "Read the rollback id from the POST response's id field, and keep R5's mapping that an API error while polling exits 1.",
+      "reconciliation": "Use res.id for polling, output and the timeout message. In the poll loop, continue only on transient failures (network errors/timeouts and ApiError with status >= 500, already retried by the client) until the 10-minute wall-clock deadline; let 4xx ApiErrors propagate to exit 1. Add tests for a transient error followed by success (AC6) and a 404/401 exiting 1.",
+      "subtle": true
     }
   ]
 }

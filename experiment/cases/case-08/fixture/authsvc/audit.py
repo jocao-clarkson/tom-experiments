@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 log = logging.getLogger("authsvc.audit")
 
-SENSITIVE_KEYS = {"password", "secret", "token", "recovery_code"}
+SENSITIVE_KEYS = {"password", "secret", "token", "recovery_code", "api_key"}
 
 
 def scrub(data: dict) -> dict:

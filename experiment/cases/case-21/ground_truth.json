@@ -5,94 +5,91 @@
   "defects": [
     {
       "id": "D1",
-      "description": "Plan creates a new inventory/purchase_orders.py that calls requests.post directly with its own auth header, timeout and retry loop, duplicating the existing SupplierClient that all supplier calls are meant to go through (and which supports an injected session and per-call retries).",
-      "location": "plan.md step 3; fixture/inventory/supplier_client.py",
-      "expected_lenses": [
-        "lens-architecture"
-      ],
+      "description": "Plan creates a new inventory/purchase_orders.py that calls requests.post directly and reads SUPPLIER_URL/SUPPLIER_API_KEY itself with its own auth header, a 10s timeout and its own retry loop, duplicating the existing SupplierClient (already injected into InventoryService as self.supplier) through which all supplier calls are meant to go.",
+      "location": "plan.md steps 3 and 5; fixture/inventory/supplier_client.py; fixture/inventory/__init__.py",
+      "expected_lenses": ["lens-architecture"],
       "severity": "major"
     },
     {
       "id": "D2",
-      "description": "The purchase-order POST is retried on timeouts, connection errors and 5xx even though the supplier endpoint is not idempotent; a timed-out request that actually succeeded upstream is retried and creates a duplicate billed purchase order, violating R3 and AC3 (supplier called exactly once on timeout).",
-      "location": "plan.md steps 3 and 5",
-      "expected_lenses": [
-        "lens-risk",
-        "lens-consistency"
-      ],
+      "description": "The purchase-order POST is retried (3 attempts, 1s/2s backoff) on Timeout, ConnectionError and 5xx although the supplier endpoint is not idempotent and bills every POST; a timed-out request that succeeded upstream is re-sent and creates a duplicate billed purchase order, violating R3 and AC3 (supplier called exactly once on timeout).",
+      "location": "plan.md steps 3 and 5; spec.md R3, AC3",
+      "expected_lenses": ["lens-risk", "lens-consistency"],
       "severity": "blocker"
     },
     {
       "id": "D3",
-      "description": "Request schema sets quantity max to 1000, but R1/AC1 require 1 to 500 inclusive (501 must be rejected).",
-      "location": "plan.md step 2",
-      "expected_lenses": [
-        "lens-consistency"
-      ],
+      "description": "REORDER_SCHEMA sets quantity max to 1000, but R1/AC1 require 1 to 500 inclusive, so 501 is accepted instead of returning 400 validation_failed; the test list also omits a 501 boundary case.",
+      "location": "plan.md step 2; spec.md R1, AC1",
+      "expected_lenses": ["lens-consistency"],
       "severity": "major"
     },
     {
       "id": "D4",
-      "description": "Pending-reorder check (get_pending_reorder) and the later insert are separate, unsynchronised steps with the supplier call in between; two concurrent requests both pass the check and both place purchase orders. AC5 is not addressed (no unique constraint, lock, or reservation row).",
-      "location": "plan.md steps 1 and 4",
-      "expected_lenses": [
-        "lens-risk",
-        "lens-spec-coverage"
-      ],
+      "description": "AC5 handling relies on UNIQUE (sku, status) firing at insert time, but the insert happens after the supplier call: two concurrent requests both pass get_pending_reorder, both place (billed) purchase orders, and only then does the second insert fail and return 409. At most one row, but two purchase orders. The planned concurrency test only asserts one reorders row, so it passes despite the duplicate order.",
+      "location": "plan.md steps 1 and 4; plan.md Test strategy (Concurrency); spec.md AC5",
+      "expected_lenses": ["lens-risk"],
       "severity": "major"
     },
     {
       "id": "D5",
-      "description": "Test strategy has no automated test for AC3 (timeout gives 502, no row, exactly one call) or AC5 (concurrency); AC3 is deferred to manual sandbox verification and the 1..500 boundary (501) is not tested.",
-      "location": "plan.md Test strategy",
-      "expected_lenses": [
-        "lens-tests"
-      ],
+      "description": "UNIQUE (sku, status) allows only one 'pending' row per SKU ever, but R5/AC6 say stale (>24h) pending rows stay unchanged and a new reorder must succeed alongside them. With a stale row present the new insert raises IntegrityError and becomes 409, after the supplier purchase order has already been placed.",
+      "location": "plan.md steps 1 and 4; spec.md R5, AC6",
+      "expected_lenses": ["lens-consistency", "lens-spec-coverage"],
       "severity": "major"
     },
     {
       "id": "D6",
-      "description": "Plan adds the 'responses' package as a new dev dependency, contradicting the spec's no-new-dependencies constraint; the fixture already has a FakeSession test double for supplier HTTP.",
-      "location": "plan.md step 8; spec.md Non-functional constraints; fixture/tests/conftest.py",
-      "expected_lenses": [
-        "lens-consistency",
-        "lens-architecture"
-      ],
+      "description": "get_pending_reorder compares created_at against SQLite datetime('now', '-24 hours') ('YYYY-MM-DD HH:MM:SS'), but created_at is written with StockRepository.now(), which is Python isoformat ('YYYY-MM-DDTHH:MM:SS.ffffff+00:00'). As a text comparison 'T' sorts after ' ', so any row from the previous UTC calendar day counts as recent, and pending rows up to about 48 hours old still block with 409, contradicting the 24-hour window in R5/AC6.",
+      "location": "plan.md step 1; fixture/inventory/repository.py (now); spec.md R5",
+      "expected_lenses": ["lens-consistency", "lens-risk"],
+      "severity": "major"
+    },
+    {
+      "id": "D7",
+      "description": "Plan adds freezegun to the dev extra in pyproject.toml, contradicting the spec's no-new-third-party-dependencies (runtime or dev) constraint.",
+      "location": "plan.md step 8; spec.md Non-functional constraints; fixture/pyproject.toml",
+      "expected_lenses": ["lens-consistency"],
       "severity": "minor"
+    },
+    {
+      "id": "D8",
+      "description": "The AC6 stale-pending test freezes Python time with freezegun, but the 24h cutoff in get_pending_reorder is computed by SQLite's datetime('now'), which freezegun doesn't affect, so the test can't show a 25-hour-old row being ignored. Also, the AC3 timeout test asserts only 502 and no row, not that the supplier was called exactly once, so it doesn't catch the retry loop.",
+      "location": "plan.md Test strategy (Stale pending, Supplier timeout); plan.md steps 1 and 8",
+      "expected_lenses": ["lens-tests"],
+      "severity": "major"
     }
   ],
   "tensions": [
     {
       "id": "T1",
-      "lenses": [
-        "lens-architecture",
-        "lens-risk"
-      ],
-      "related_defects": [
-        "D1",
-        "D2"
-      ],
-      "description": "Architecture's natural fix is to delete purchase_orders.py and call SupplierClient.post. But SupplierClient retries every method, POST included, on timeouts and 502/503/504 by default (retries=3), so a straight swap keeps the duplicate-purchase-order risk. Risk's natural fix is to remove the retry loop from the new module, which keeps the duplicated client.",
-      "lens_a_fix": "Replace the hand-written requests.post module with the existing SupplierClient.post so auth, timeout and logging follow the shared convention.",
-      "lens_b_fix": "Remove retries from the purchase-order call because the supplier POST is non-idempotent; fail fast with 502.",
-      "reconciliation": "Use SupplierClient.post with the per-call override retries=0 for the purchase-order call. That keeps the shared client and stops the retries. Drop purchase_orders.py, map SupplierError to UpstreamError, and keep default retries for GETs only.",
+      "lenses": ["lens-architecture", "lens-risk"],
+      "related_defects": ["D1", "D2"],
+      "description": "Architecture's fix is to delete purchase_orders.py and call the injected SupplierClient.post. SupplierClient itself has no retry logic, so the swap looks clean. But its default session comes from transport.build_session(), which mounts an HTTPAdapter with urllib3 Retry(total=3, status_forcelist 502/503/504, allowed_methods=None). allowed_methods=None means POST is retried on read timeouts and 5xx at the transport level. Risk's fix is to strip the retry loop from purchase_orders.py, which keeps the duplicated client. Doing both still sends the non-idempotent POST up to 4 times. SupplierClient.post has no per-call override.",
+      "lens_a_fix": "Replace the hand-written requests.post module with self.supplier.post('/purchase-orders', ...) so auth, timeout and logging follow the shared SupplierClient convention.",
+      "lens_b_fix": "Remove the retry loop from the purchase-order call because the supplier POST is non-idempotent; fail fast with a single attempt and 502.",
+      "reconciliation": "Drop purchase_orders.py and route the order through SupplierClient. Give the purchase-order path a SupplierClient (or session) without the transport Retry adapter: a plain requests.Session, or a non-retrying variant of build_session, wired in create_app/InventoryService. Keep the retrying build_session() for idempotent GET price lookups. Map SupplierError to UpstreamError as supplier_price does. Test AC3 with FakeSession (a single queued Timeout gives 502, no row, one call), plus a check that the purchase-order client's session has no retrying adapter.",
       "subtle": true
     },
     {
       "id": "T2",
-      "lenses": [
-        "lens-tests",
-        "lens-consistency"
-      ],
-      "related_defects": [
-        "D5",
-        "D6"
-      ],
-      "description": "Tests wants automated coverage of the timeout and concurrency paths, and the plan's chosen mocking tool for that is 'responses'. Consistency wants 'responses' removed because the spec forbids new dependencies. Taken literally, removing it leaves no way to mock the hand-rolled requests.post call, which pushes toward fewer tests.",
-      "lens_a_fix": "Add automated tests for AC3 and AC5 using the plan's HTTP mocking (register a timeout with responses, assert one call and no row).",
-      "lens_b_fix": "Remove the responses dev dependency to satisfy the no-new-dependencies constraint.",
-      "reconciliation": "Drop 'responses' and test through the existing FakeSession injected into SupplierClient. This works once T1 routes the call through SupplierClient. Queue a requests.Timeout and assert a 502, one call, and no row. Cover AC5 with a repository-level test of a unique pending constraint or reservation.",
-      "subtle": false
+      "lenses": ["lens-tests", "lens-consistency"],
+      "related_defects": ["D8", "D7", "D6"],
+      "description": "Tests sees that the freezegun-based AC6 test can't work because the cutoff comes from SQLite's clock. Its natural fix is to compute the cutoff in Python with datetime.now() so freezegun takes effect, which keeps freezegun. Consistency's fix is to remove freezegun because the spec forbids new dev dependencies, which leaves AC6 with no way to move the clock as planned.",
+      "lens_a_fix": "Compute the 24h cutoff in Python (datetime.now(timezone.utc) - 24h) so the freezegun freeze_time test exercises AC6, and assert the 25-hour-old row no longer blocks.",
+      "lens_b_fix": "Remove freezegun from the dev extra to satisfy the no-new-dependencies constraint.",
+      "reconciliation": "Drop freezegun. Compute the cutoff in Python from the repository's existing clock seam, StockRepository.now(), in the same isoformat as created_at (this also fixes the D6 format mismatch), and pass it as a query parameter. Test AC6 without new packages by inserting a pending row with created_at 25 hours in the past (or by monkeypatching StockRepository.now) and asserting 202 with both rows present.",
+      "subtle": true
+    },
+    {
+      "id": "T3",
+      "lenses": ["lens-risk", "lens-consistency"],
+      "related_defects": ["D4", "D5"],
+      "description": "Risk's fix for the AC5 race is to insert a reservation row before calling the supplier and rely on the UNIQUE (sku, status) constraint to reject the concurrent second request. Consistency's fix for R5/AC6 is to remove UNIQUE (sku, status), because stale pending rows must coexist with a new one. Risk's reservation depends on the very constraint consistency removes. A partial unique index on pending rows doesn't help either, because stale pending rows stay 'pending'.",
+      "lens_a_fix": "Reserve first: insert the pending row before calling the supplier, so the unique constraint rejects the second concurrent request before it can place an order.",
+      "lens_b_fix": "Drop UNIQUE (sku, status) so a new pending reorder can be inserted while a stale (>24h) pending row exists.",
+      "reconciliation": "Drop the UNIQUE (sku, status) constraint. Add one repository method that, in a single BEGIN IMMEDIATE transaction on one connection, checks for a pending row newer than the 24h cutoff and inserts a reservation row with supplier_po_id nullable. Today repo.connect() opens a new connection per call, so separate get/create calls aren't atomic. Call the supplier only after the reservation commits. On success, fill in supplier_po_id. On failure, delete the reservation so no row remains (R6/AC3). Test AC5 by asserting one supplier call across the two threads, not one row.",
+      "subtle": true
     }
   ]
 }

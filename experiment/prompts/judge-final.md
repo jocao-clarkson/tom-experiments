@@ -16,9 +16,7 @@ You don't see the plan or the code. Judge only from the findings and the ground 
 
 2. **Out-of-lane.** For every finding, set `out_of_lane` to true when its main subject belongs to a different lens's area than the lens that raised it. Overlap is normal; flag it only when the finding is clearly another lens's job.
 
-3. **Contradictions (main metric).** List every pair of findings **from different lenses** whose recommendations can't both be followed as written: doing one rules out doing the other, or undoes it. Two findings about different topics are not a contradiction. A finding that mentions and accommodates another lens's concern is not a contradiction. List each pair once.
-
-4. **Seeded tensions.** For every seeded tension, give a status:
+3. **Seeded tensions.** For every seeded tension, give a status:
    - `reconciled`: at least one finding, on its own, recommends a fix that satisfies both concerns (or explicitly trades one off against the other with a reason), **and** no final finding still recommends one side in a way that conflicts with that fix. Don't assemble a reconciliation yourself from separate findings that each cover one side.
    - `unreconciled_conflict`: both sides are raised, but no single finding reconciles them, or some finding still recommends a side that conflicts with the reconciling one.
    - `one_side_only`: only one side's concern appears.
@@ -32,9 +30,6 @@ Reply with only one JSON object, in a ```json fenced block, with exactly these k
 {
   "findings": [
     {"lens": "lens-risk", "id": "RSK-1", "matches_defects": ["D2"], "out_of_lane": false, "note": "one short reason"}
-  ],
-  "contradictions": [
-    {"a": {"lens": "lens-risk", "id": "RSK-1"}, "b": {"lens": "lens-consistency", "id": "CON-2"}, "why": "one sentence"}
   ],
   "tensions": [
     {"id": "T1", "status": "reconciled", "evidence": "finding ids and one sentence"}

@@ -25,9 +25,16 @@ def test_adjust_cannot_go_negative(client):
     assert resp.status_code == 400
 
 
-def test_supplier_price_retries_on_timeout(client, fake_session):
-    fake_session.queue(requests.Timeout("slow"))
+def test_supplier_price(client, fake_session):
     fake_session.queue(FakeResponse(200, {"price_cents": 1299}))
     resp = client.get("/items/A-1/supplier-price")
     assert resp.status_code == 200
-    assert len(fake_session.calls) == 2
+    assert resp.get_json()["price_cents"] == 1299
+    assert fake_session.calls[0]["url"] == "https://supplier.test/catalog/A-1/price"
+
+
+def test_supplier_price_timeout_is_502(client, fake_session):
+    fake_session.queue(requests.Timeout("slow"))
+    resp = client.get("/items/A-1/supplier-price")
+    assert resp.status_code == 502
+    assert resp.get_json()["error"]["code"] == "upstream_error"

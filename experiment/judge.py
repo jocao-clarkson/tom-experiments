@@ -2,10 +2,12 @@
 
 For every finished run in experiment/results/<run-id>/ without a judge.json:
 
-- final        (all techniques): contradictions, seeded tensions, defect matches,
-               out-of-lane. Blind: the judge sees only the final findings and the
-               ground truth, with no technique name and no predictions, debate or
-               surprise blocks.
+- final        (all techniques): seeded tensions, defect matches, out-of-lane.
+               Blind: the judge sees only the final findings and the ground truth,
+               with no technique name and no predictions, debate or surprise blocks.
+- contradictions (all techniques): pairs of final findings from different lenses
+               that can't both be followed, found topic by topic. The judge sees
+               only the final findings, not even the ground truth.
 - flips        (second-round, debate, ptu): round-1 findings that matched a defect
                and what happened to them in round 2. Same blinding.
 - predictions  (ptu only): how well each lens predicted each peer.
@@ -32,7 +34,8 @@ PROMPTS = Path(__file__).resolve().parent / "prompts"
 INSTRUCTION = "Follow the judge instructions and the JUDGE TASK in the input, and reply with only the JSON object."
 HEADER = re.compile(r"^[A-Z][A-Z \-]*:")
 REQUIRED = {
-    "final": ["findings", "contradictions", "tensions"],
+    "final": ["findings", "tensions"],
+    "contradictions": ["topics", "contradictions"],
     "flips": ["round1_matches"],
     "predictions": ["pairs"],
 }
@@ -114,7 +117,10 @@ def build_inputs(rounds, gt, technique):
             "defects": defects,
             "tensions": tensions,
             "findings": {l: parse_findings(rounds[final].get(l, "")) for l in LENSES},
-        }
+        },
+        "contradictions": {
+            "findings": {l: parse_findings(rounds[final].get(l, "")) for l in LENSES},
+        },
     }
     if ROUNDS[technique] == 2:
         tasks["flips"] = {

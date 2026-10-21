@@ -6,8 +6,8 @@ export interface OutputOptions {
 }
 
 /**
- * All command output goes through Output. Human progress lines are
- * suppressed in --json mode so stdout stays a single parseable document.
+ * All command output goes through Output. In --json mode, human progress
+ * lines are suppressed and stdout carries only the result document.
  */
 export class Output {
   private readonly stdout: NodeJS.WritableStream;
@@ -31,7 +31,7 @@ export class Output {
   }
 
   result(data: Record<string, unknown>, summary: string): void {
-    if (this.opts.json) this.stdout.write(JSON.stringify(data) + "\n");
+    if (this.opts.json) this.stdout.write(JSON.stringify(data, null, 2) + "\n");
     else this.stdout.write(summary + "\n");
   }
 }

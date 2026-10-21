@@ -1,6 +1,6 @@
-from .errors import NotFound, ValidationFailed
+from .errors import NotFound, UpstreamError, ValidationFailed
 from .repository import StockRepository
-from .supplier_client import SupplierClient
+from .supplier_client import SupplierClient, SupplierError
 
 
 class InventoryService:
@@ -26,4 +26,7 @@ class InventoryService:
 
     def supplier_price(self, sku: str) -> dict:
         self.get_item(sku)
-        return self.supplier.get(f"/catalog/{sku}/price")
+        try:
+            return self.supplier.get(f"/catalog/{sku}/price")
+        except SupplierError as exc:
+            raise UpstreamError("supplier price lookup failed", supplier_status=exc.status) from exc

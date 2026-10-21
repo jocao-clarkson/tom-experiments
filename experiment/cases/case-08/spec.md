@@ -28,7 +28,7 @@ Customers' CI systems and back-office scripts currently sign in with a human adm
 ## Non-functional constraints
 
 - API key authentication adds at most 5 ms p95 at 2,000 requests/s per region (spread across 6 instances).
-- Secrets must never be logged, including in debug logs and audit metadata.
+- Secrets must never be written to logs or audit metadata.
 - The keys table must tolerate 2k rps of authentication without lock contention.
 
 ## Out of scope

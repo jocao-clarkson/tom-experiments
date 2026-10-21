@@ -24,7 +24,7 @@ Revenue dashboards sum `amount` across currencies, which overstates revenue in w
 
 ## Non-functional constraints
 
-- The nightly run starts at 02:00 UTC and must finish by 04:00. A backfill may be running at the same time and must neither block the nightly run nor change where the nightly run resumes from.
+- The nightly run starts at 02:00 UTC and must finish by 04:00. A backfill in progress must not delay the nightly run or change which partitions it processes.
 - Backfill must be safe to stop with Ctrl-C and restart.
 - CI has no warehouse access and no credentials; the test job must finish within 5 minutes.
 - No new Python dependencies.

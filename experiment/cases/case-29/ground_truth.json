@@ -5,102 +5,81 @@
   "defects": [
     {
       "id": "D1",
-      "description": "Plan writes its own inline readline prompt in rollback.ts instead of reusing confirm() from src/ui/prompt.ts, which every command uses for --yes and non-TTY handling.",
-      "location": "plan.md step 4; fixture/src/ui/prompt.ts",
-      "expected_lenses": [
-        "lens-architecture"
-      ],
+      "description": "Step 4 builds its own readline y/N prompt and non-TTY refusal inside rollback.ts instead of reusing confirm() from src/ui/prompt.ts, which deploy uses and which already implements --yes skipping, the non-interactive refusal, and the y/yes answer check.",
+      "location": "plan.md step 4; fixture/src/ui/prompt.ts; fixture/src/commands/deploy.ts",
+      "expected_lenses": ["lens-architecture"],
       "severity": "minor"
     },
     {
       "id": "D2",
-      "description": "In a non-interactive session without --yes, the plan skips the prompt and proceeds with the rollback. That contradicts R3/AC1 (exit 2, no POST) and is dangerous for unattended sessions.",
-      "location": "plan.md step 4; spec.md R3, AC1",
-      "expected_lenses": [
-        "lens-consistency",
-        "lens-risk"
-      ],
-      "severity": "blocker"
-    },
-    {
-      "id": "D3",
-      "description": "Timeout exits with code 1 'consistent with deploy', but R5 requires exit code 3 for a timeout.",
-      "location": "plan.md step 8; spec.md R5",
-      "expected_lenses": [
-        "lens-consistency"
-      ],
+      "description": "Step 4 refuses a non-interactive session without --yes by throwing AbortError, whose exitCode is 1 (src/errors.ts). R3/AC1 require this case to be a usage error with exit code 2 (UsageError).",
+      "location": "plan.md step 4; fixture/src/errors.ts; spec.md R3, AC1",
+      "expected_lenses": ["lens-consistency"],
       "severity": "major"
     },
     {
+      "id": "D3",
+      "description": "Step 7 prints human progress lines with console.log and hand-rolled ANSI colours, bypassing the shared Output class (src/ui/output.ts) that all commands write through. This ignores Output's injected stdout (so tests using capture() cannot see the lines) and duplicates its TTY colour handling.",
+      "location": "plan.md step 7; fixture/src/ui/output.ts",
+      "expected_lenses": ["lens-architecture"],
+      "severity": "minor"
+    },
+    {
       "id": "D4",
-      "description": "Polling every 500 ms is 120 requests/min, which exceeds the 60/min per-token limit shared across the user's commands (AC6). Each GET is also retried up to 4 times by ApiClient, and the resulting 429s would fail the wait mid-incident.",
-      "location": "plan.md step 6; fixture/src/api/client.ts",
-      "expected_lenses": [
-        "lens-risk"
-      ],
+      "description": "Step 8 emits the NDJSON state and result events through Output.result(), but Output.result() in --json mode writes JSON.stringify(data, null, 2), i.e. indented multi-line JSON. Each event therefore spans several lines, so stdout is not NDJSON and AC3 ('every stdout line parses as JSON on its own') fails.",
+      "location": "plan.md step 8; fixture/src/ui/output.ts; spec.md R6, AC3",
+      "expected_lenses": ["lens-consistency", "lens-tests"],
       "severity": "major"
     },
     {
       "id": "D5",
-      "description": "--json --wait prints only the final result object via out.result. The NDJSON stream R6/AC3 require (one state event per transition, then a result event) is not implemented.",
-      "location": "plan.md steps 7-8; spec.md R6, AC3",
-      "expected_lenses": [
-        "lens-spec-coverage"
-      ],
+      "description": "Step 6 polls GET /rollbacks/:id every 1 s (POLL_MS = 1_000), i.e. 60 requests/minute: the entire per-token limit from the spec's non-functional constraints, which is shared with other commands such as a concurrent deploy --wait (another 12/min at deploy's 5 s POLL_MS). ApiClient does not retry 429 (only 502/503/504), so a throttled poll throws ApiError and the wait fails with exit 1; AC6 is not met.",
+      "location": "plan.md step 6; spec.md non-functional constraints, AC6; fixture/src/api/client.ts; fixture/src/commands/deploy.ts",
+      "expected_lenses": ["lens-risk"],
       "severity": "major"
     },
     {
       "id": "D6",
-      "description": "Progress lines use console.log with hardcoded ANSI colours, bypassing Output. That ignores the TTY colour rule (R7), and in --json mode it writes human text into stdout and corrupts the machine-readable output.",
-      "location": "plan.md step 7; fixture/src/ui/output.ts",
-      "expected_lenses": [
-        "lens-architecture",
-        "lens-risk"
-      ],
+      "description": "Step 9 signals a wait timeout by throwing AbortError, whose exitCode is 1 (src/errors.ts); R5/AC2 require exit code 3 for a timeout.",
+      "location": "plan.md step 9; fixture/src/errors.ts; spec.md R5, AC2",
+      "expected_lenses": ["lens-consistency"],
       "severity": "major"
     },
     {
       "id": "D7",
-      "description": "The test strategy has no automated tests for AC1 (non-TTY without --yes), AC2 (timeout exit 3, deferred to manual staging even though a sleep/clock can be injected as deploy() does), or AC6 (poll rate). The --wait --json test checks only the final state, not NDJSON.",
+      "description": "Test strategy has no automated test for AC1 (non-TTY without --yes exits 2 with no POST), defers AC2 (timeout exit 3) to a manual staging game day although sleep is injectable and a clock could be too, and has nothing for AC6 (poll rate). The --json --wait test only checks that state events exist and the last event, not that each line parses alone or that there is one state line per transition.",
       "location": "plan.md Test strategy",
-      "expected_lenses": [
-        "lens-tests"
-      ],
+      "expected_lenses": ["lens-tests"],
       "severity": "major"
+    },
+    {
+      "id": "D8",
+      "description": "Step 2 defaults --timeout to 15m, but R1 specifies a default of 10m.",
+      "location": "plan.md step 2; spec.md R1",
+      "expected_lenses": ["lens-consistency"],
+      "severity": "minor"
     }
   ],
   "tensions": [
     {
       "id": "T1",
-      "lenses": [
-        "lens-architecture",
-        "lens-consistency"
-      ],
-      "related_defects": [
-        "D1",
-        "D2"
-      ],
-      "description": "Architecture's fix is to replace the inline prompt with the shared confirm(). Consistency's fix is to refuse in non-TTY without --yes and exit 2. But the fixture's confirm() throws AbortError in that case, which cli.ts maps to exit code 1, so the straightforward reuse produces the wrong exit code for AC1. Changing confirm() or AbortError to fix that would change deploy's behaviour, which is out of scope. You only see this by reading prompt.ts and errors.ts.",
-      "lens_a_fix": "Use confirm() from src/ui/prompt.ts instead of an inline readline prompt.",
-      "lens_b_fix": "In a non-interactive session without --yes, stop with exit code 2 and make no POST.",
-      "reconciliation": "In rollback.ts, check for !isTTY && !yes before prompting and throw UsageError (exit 2). Then call the shared confirm() for the interactive case. Leave prompt.ts and deploy's exit-1 behaviour unchanged, and test that the non-TTY path makes no POST and exits 2.",
+      "lenses": ["lens-architecture", "lens-consistency"],
+      "related_defects": ["D1", "D2"],
+      "description": "Architecture sees the inline prompt duplicating confirm() and recommends swapping it in; confirm() refuses non-TTY sessions with AbortError, exactly as the plan describes, so the swap looks behaviour-preserving. Consistency sees that AbortError exits 1 (errors.ts) while R3/AC1 require exit 2, and recommends throwing UsageError in the refusal path. Combined, they conflict: once the shared confirm() is used, the refusal is confirm()'s AbortError and exits 1 again. Changing confirm() to throw UsageError would change deploy's behaviour (out of scope) and break deploy.test.ts, which asserts AbortError.",
+      "lens_a_fix": "Replace the inline readline prompt in rollback.ts with confirm() from src/ui/prompt.ts.",
+      "lens_b_fix": "Throw UsageError (exit 2) instead of AbortError when the session is non-interactive and --yes is absent.",
+      "reconciliation": "In rollback.ts, check !isTTY && !yes first and throw UsageError (exit 2) before any API write; then call the shared confirm() for the interactive path (which still exits 1 on a declined prompt). Leave prompt.ts, AbortError, and deploy's exit-1 behaviour unchanged, and add a test that the non-TTY path exits 2 with zero POST calls.",
       "subtle": true
     },
     {
       "id": "T2",
-      "lenses": [
-        "lens-spec-coverage",
-        "lens-architecture"
-      ],
-      "related_defects": [
-        "D5",
-        "D6"
-      ],
-      "description": "Coverage wants NDJSON state events written to stdout during --wait, and the quickest route is writing JSON lines directly from rollback.ts. Architecture wants all output routed through Output, but Output in --json mode suppresses line() and only supports a single final document. Each fix on its own breaks the other: direct writes keep bypassing Output, and routing through today's Output makes NDJSON impossible.",
-      "lens_a_fix": "Emit one JSON line per state change and a final result line on stdout when --json --wait is used.",
-      "lens_b_fix": "Remove console.log and ANSI codes from rollback.ts; send all output through Output (line/ok/result).",
-      "reconciliation": "Add a small event(obj, humanText) method to Output. In --json mode it writes one JSON line, otherwise a TTY-aware human line. Use it for state changes and use result() for the final {event: 'result'} line. Output stays the single writer, NDJSON is satisfied, and deploy's single-document behaviour is unchanged.",
-      "subtle": false
+      "lenses": ["lens-architecture", "lens-consistency"],
+      "related_defects": ["D3", "D4"],
+      "description": "Architecture wants every line of rollback output to go through Output instead of console.log. Consistency sees that the Output.result() route the plan uses for NDJSON pretty-prints (JSON.stringify with indent 2), so events span multiple lines, and recommends writing each event as a compact single-line JSON.stringify to stdout, or making Output.result() compact. Writing to stdout directly reintroduces the bypass architecture objected to; making result() compact changes deploy's --json output, which is out of scope. Routing everything through today's Output cannot produce NDJSON.",
+      "lens_a_fix": "Remove console.log and ANSI codes from rollback.ts and send all output through Output (line/ok/result).",
+      "lens_b_fix": "Emit each state/result event as a single-line JSON.stringify(event) on stdout (or change Output.result to compact JSON) so each line parses on its own.",
+      "reconciliation": "Add a new event(data, humanText) method to Output that writes compact single-line JSON in --json mode and a TTY-aware human line otherwise. Use it for every state change and for the final {event: 'result'} line under --wait; keep result() (indented) for the no-wait single object and for deploy, so deploy's output and tests are unchanged. Test that each stdout line parses alone.",
+      "subtle": true
     }
   ]
 }

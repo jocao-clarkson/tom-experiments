@@ -898,7 +898,19 @@ def fake_judge(stdin):
     task = re.search(r"JUDGE TASK:\s*(\w+)", stdin).group(1)
     data = json.loads(stdin.split("<<<INPUT_JSON", 1)[1].split("INPUT_JSON>>>", 1)[0])
     rng = random.Random(hashlib.sha256(stdin.encode()).hexdigest())
-    if task == "final":
+    if task == "contradictions":
+        refs = [(lens, f["id"]) for lens, fs in data["findings"].items() for f in fs]
+        contradictions = []
+        for _ in range(rng.randint(0, 3)):
+            if len(refs) < 2:
+                break
+            a, b = rng.sample(refs, 2)
+            if a[0] != b[0]:
+                contradictions.append({"a": {"lens": a[0], "id": a[1]}, "b": {"lens": b[0], "id": b[1]},
+                                       "topic": "mock", "why": "mock"})
+        answer = {"topics": [{"topic": "mock", "findings": [{"lens": l, "id": i} for l, i in refs[:2]]}],
+                  "contradictions": contradictions}
+    elif task == "final":
         defects = [d["id"] for d in data["defects"]]
         findings, refs = [], []
         for lens, fs in data["findings"].items():

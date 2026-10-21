@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 import jwt
 from fastapi import Depends, HTTPException, Request
 
+from . import orgs
 from .settings import Settings, get_settings
 
 
@@ -39,6 +40,8 @@ def current_principal(request: Request, settings: Settings = Depends(get_setting
     try:
         claims = jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
     except jwt.PyJWTError:
+        raise HTTPException(status_code=401, detail={"code": "unauthenticated"})
+    if not orgs.is_active(request.app.state.db, claims["org"]):
         raise HTTPException(status_code=401, detail={"code": "unauthenticated"})
     return Principal(
         subject=claims["sub"],
