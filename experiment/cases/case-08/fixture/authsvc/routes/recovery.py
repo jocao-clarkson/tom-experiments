@@ -1,9 +1,8 @@
 from fastapi import APIRouter, Depends, Request
 
 from ..audit import AuditLog
+from ..crypto import hash_secret, recovery_code
 from ..principal import Principal, current_principal
-from ..security.hashing import hash_secret
-from ..security.tokens import recovery_code
 
 router = APIRouter()
 

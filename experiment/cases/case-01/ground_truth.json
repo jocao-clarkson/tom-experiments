@@ -5,38 +5,52 @@
   "defects": [
     {
       "id": "D1",
-      "description": "Plan creates a new orders/payfast.py client that calls requests.post directly and builds its own base URL and auth header, duplicating the existing ResilientClient (orders/http_client.py) that create_app already receives as payments_client and that capture() uses for PayFast.",
-      "location": "plan.md steps 3-4; fixture/orders/http_client.py; fixture/orders/__init__.py",
+      "description": "Plan adds a new orders/payfast.py client that calls requests.post directly and builds its own base URL and Bearer auth header, duplicating the existing ResilientClient (orders/http_client.py) that the app already injects as the payments client (built by settings.build_payments_client) and that capture() uses for PayFast. It also adds a second wiring path (refunds_client in create_app) for the same provider.",
+      "location": "plan.md steps 3-4; fixture/orders/http_client.py; fixture/orders/__init__.py; fixture/orders/settings.py",
       "expected_lenses": ["lens-architecture"],
       "severity": "major"
     },
     {
       "id": "D2",
-      "description": "The new PayFast refund call has no timeout (requests.post without timeout=), so a hung provider can block the worker indefinitely, violating the 10-second worst-case constraint and making the 'does not respond' path of R5 unreachable.",
+      "description": "The new PayFast refund call has no timeout (requests.post without timeout=), so a hung provider can block the request indefinitely. This violates the spec's 10-second worst-case constraint and makes R5's 'does not respond' path unreachable.",
       "location": "plan.md step 3; spec.md non-functional constraints",
       "expected_lenses": ["lens-risk"],
       "severity": "major"
     },
     {
       "id": "D3",
-      "description": "On PayFast failure the plan lets UpstreamError propagate without inserting a refund row, so no 'failed' refund is recorded. This misses R4/R5 and AC3, which require a failed row to exist.",
+      "description": "On a PayFast error the plan lets UpstreamError propagate without inserting a refund row, so no 'failed' refund is recorded. This misses R4 (every attempt persisted), R5 and AC3 (a failed row must exist).",
       "location": "plan.md step 6; spec.md R4, R5, AC3",
       "expected_lenses": ["lens-spec-coverage", "lens-consistency"],
       "severity": "major"
     },
     {
       "id": "D4",
-      "description": "The refundable-amount check reads list_refunds, calls PayFast, then inserts, with no transaction or reservation. Two concurrent requests can both pass the check and together exceed captured_cents, violating AC5. The repository's BEGIN IMMEDIATE transaction() is not used.",
+      "description": "The refundable-amount check reads list_refunds, then calls PayFast, then inserts, with no transaction, lock or reservation. Two concurrent refunds on the same order can both pass the check and together exceed captured_cents, violating AC5. The repository's BEGIN IMMEDIATE transaction() is not used.",
       "location": "plan.md steps 5-6; fixture/orders/repository.py transaction(); spec.md AC5",
       "expected_lenses": ["lens-risk"],
       "severity": "blocker"
     },
     {
       "id": "D5",
-      "description": "AC3 (timeout/5xx gives 502 plus a failed row) is left to manual sandbox checks, even though the fixture's FakeSession/ResilientClient test setup can script timeouts and 5xx offline. AC5 (concurrency) has no test at all.",
-      "location": "plan.md test strategy; fixture/tests/conftest.py",
+      "description": "AC3 (PayFast timeout or 5xx gives 502 plus a failed row) is left to a manual sandbox check instead of an automated offline test, even though the spec requires offline CI tests and the fixture's FakeSession can script timeouts and 5xx responses without a new dependency.",
+      "location": "plan.md test strategy; fixture/tests/conftest.py; spec.md AC3, non-functional constraints",
       "expected_lenses": ["lens-tests"],
       "severity": "major"
+    },
+    {
+      "id": "D6",
+      "description": "AC5 (concurrent refunds never together exceed the captured amount) has no test in the plan's test strategy.",
+      "location": "plan.md test strategy; spec.md AC5",
+      "expected_lenses": ["lens-tests", "lens-spec-coverage"],
+      "severity": "major"
+    },
+    {
+      "id": "D7",
+      "description": "Plan step 1 allows reason up to 500 characters ('matching the dashboard's note field'), contradicting R1's limit of 1 to 280 characters.",
+      "location": "plan.md step 1; spec.md R1",
+      "expected_lenses": ["lens-consistency", "lens-spec-coverage"],
+      "severity": "minor"
     }
   ],
   "tensions": [
@@ -44,20 +58,30 @@
       "id": "T1",
       "lenses": ["lens-architecture", "lens-risk"],
       "related_defects": ["D1", "D2"],
-      "description": "Architecture's natural fix is to drop payfast.py and reuse the injected ResilientClient, which gives a timeout and shared auth. But ResilientClient retries every method, POST included, up to 3 times on timeouts and 5xx. PayFast refunds are not idempotent, so a timed-out-but-processed refund would be issued again. Reusing it as-is turns the timeout fix into a double-refund risk. Risk wants a timeout with a single attempt, which the plain reuse does not give.",
-      "lens_a_fix": "Delete orders/payfast.py and call the existing payments ResilientClient's post('/v1/refunds', ...) from OrderService.",
-      "lens_b_fix": "Keep the refund call single-attempt with an explicit timeout under the 10s budget and never retry it, since PayFast refunds are not idempotent.",
-      "reconciliation": "Reuse ResilientClient for base URL, auth and timeout, but call it with retries disabled for the refund (construct or pass max_retries=0, or add a per-call retry flag for non-idempotent POSTs), with a timeout that fits inside 10s. Treat a timeout as an unknown outcome to record and reconcile, not as something to retry.",
+      "description": "Architecture's fix is to drop payfast.py and call the injected payments client (self.payments.post('/v1/refunds', ...)) as capture() does. ResilientClient itself looks safe for this: its own default is max_retries=0 and it has a timeout. But the shared payments instance is built in settings.py with PAYFAST_MAX_RETRIES=2 and PAYFAST_TIMEOUT=4.0, and ResilientClient's retry loop does not distinguish methods, so the refund POST would be resent on a timeout or 5xx. PayFast refunds are not idempotent (spec), so this can issue duplicate refunds, and the worst case is 3 x 4s plus backoff (about 12.75s), over the 10s budget. Risk's fix (add a timeout and never retry, inside payfast.py) keeps the duplicated client architecture rejects.",
+      "lens_a_fix": "Delete orders/payfast.py and the refunds_client wiring; call the existing injected payments ResilientClient's post('/v1/refunds', ...) from OrderService.create_refund, as capture() does.",
+      "lens_b_fix": "Give the refund call an explicit timeout under the 10-second budget and make it a single attempt with no retries, since PayFast refunds are not idempotent (for example, requests.post(..., timeout=8) in payfast.py).",
+      "reconciliation": "Reuse ResilientClient for the refund but not the shared payments instance: build a dedicated refunds instance from the same settings (base URL, API key) with max_retries=0 and a timeout that fits the 10s budget (e.g. 8s), and inject it in place of payfast.py. It needs the risk side's facts (spec: no idempotency keys, 10s worst case) and the architecture side's facts (settings.py configures the shared client with 2 retries and a 4s timeout; ResilientClient retries any method and exposes max_retries). A timeout is then recorded as failed per R5, never retried.",
       "subtle": true
     },
     {
       "id": "T2",
       "lenses": ["lens-spec-coverage", "lens-risk"],
       "related_defects": ["D3", "D4"],
-      "description": "Coverage's fix is to insert a 'failed' row after a PayFast error, keeping the check, call, insert ordering. Risk's fix for the race is to reserve the amount before calling PayFast by inserting a row inside a BEGIN IMMEDIATE transaction and counting it toward the limit. That needs a third, in-flight status (for example 'pending') that the spec's two-status model (succeeded/failed) and the GET listing do not allow for, and it changes the ordering coverage assumed.",
-      "lens_a_fix": "After a failed PayFast call, insert the refund with status 'failed' and then return 502.",
-      "lens_b_fix": "Inside a transaction, check the balance and insert a pending reservation row before calling PayFast, and count pending rows toward the limit.",
-      "reconciliation": "Insert a 'pending' row under repo.transaction() before the PayFast call, counting pending plus succeeded toward the limit, then update it to succeeded or failed. Flag to the spec owner that this adds a transient status visible in GET /refunds (or hide pending rows from the list), so R4's two-status wording and AC3 are both still met.",
+      "description": "Coverage's fix is to insert a 'failed' row when PayFast raises and then re-raise UpstreamError for the 502. Risk's fix for the race is to wrap the balance check, PayFast call and insert in repo.transaction() (BEGIN IMMEDIATE), as capture() does for its update. Combined, the failed row is written inside the transaction and the re-raised UpstreamError makes transaction() ROLLBACK, so the failed row AC3 requires disappears; the write lock is also held across a network call of up to 10s.",
+      "lens_a_fix": "In create_refund, catch UpstreamError from the PayFast call, insert the refund with status 'failed', then re-raise so the API returns 502.",
+      "lens_b_fix": "Run the remaining-amount check, the PayFast call and the insert inside repo.transaction() so concurrent requests are serialized by BEGIN IMMEDIATE.",
+      "reconciliation": "Split the work: in a short repo.transaction(), check the balance (counting succeeded plus in-flight rows) and insert a reservation row; commit; call PayFast outside any transaction; then record the outcome with repo.update_refund(status='succeeded' or 'failed', provider_ref=...) and only then raise UpstreamError for the 502. It needs coverage's fact (R4/AC3: the failed row must persist after a provider error) and risk's fact (transaction() rolls back on any exception and BEGIN IMMEDIATE blocks other writers). The transient status should be raised with the spec owner or hidden from GET /refunds, since R4 names only succeeded and failed.",
+      "subtle": true
+    },
+    {
+      "id": "T3",
+      "lenses": ["lens-tests", "lens-risk"],
+      "related_defects": ["D6", "D4"],
+      "description": "Tests' fix for the missing AC5 test is a test that fires two refund POSTs from two threads through the existing client/repo fixtures and asserts the total stays within captured_cents. Risk's fix makes AC5 rest on BEGIN IMMEDIATE in repo.transaction(). But the conftest repo fixture is one in-memory OrderRepository with a single sqlite connection shared across threads (check_same_thread=False, isolation_level=None). BEGIN IMMEDIATE only serializes separate connections; on one shared connection the second thread fails with 'cannot start a transaction within a transaction' (a 500) or runs inside the first thread's transaction. So the threaded test errors, or passes without exercising the lock.",
+      "lens_a_fix": "Add a concurrency test that starts two threads posting refunds whose sum exceeds the captured amount through the shared client fixture and asserts that the total of succeeded refunds is at most captured_cents.",
+      "lens_b_fix": "Serialize the check-and-reserve with repo.transaction() (BEGIN IMMEDIATE) so a second concurrent request waits and then sees the first one's row.",
+      "reconciliation": "Write the AC5 test against a file-backed database under tmp_path with two separate OrderRepository instances (and apps), modeling separate worker connections as in production (settings.ORDERS_DB_PATH). Assert exactly one 201 and one 409 refund_exceeds_capture and a total within captured_cents. Don't use threads over the shared in-memory fixture. It needs risk's fact (the guarantee comes from BEGIN IMMEDIATE across connections) and tests' fact (the conftest repo fixture shares one in-memory connection).",
       "subtle": true
     }
   ]

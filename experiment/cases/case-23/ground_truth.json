@@ -5,105 +5,91 @@
   "defects": [
     {
       "id": "D1",
-      "description": "Plan stores the raw reset token in password_resets.token and looks it up by equality, violating R2/AC2 (store only the SHA-256 hash). The fixture already has hashToken, and lookup by hash is just as indexable.",
-      "location": "plan.md steps 1-2; fixture/src/lib/credentials.ts",
-      "expected_lenses": [
-        "lens-risk",
-        "lens-architecture"
-      ],
+      "description": "Plan stores the raw reset token in password_resets.token and looks it up by equality (findByToken), violating R2/AC2 (store only the SHA-256 hash). The fixture already has hashToken in src/lib/credentials.ts and sessions use the same token_hash pattern; lookup by hash is just as indexable.",
+      "location": "plan.md steps 1-2; fixture/src/lib/credentials.ts; fixture/migrations/013_sessions.sql",
+      "expected_lenses": ["lens-risk", "lens-architecture"],
       "severity": "blocker"
     },
     {
       "id": "D2",
-      "description": "Unknown email returns 404 account_not_found, which contradicts R1/AC1 (always the same 202) and enables account enumeration.",
+      "description": "Unknown email throws AuthError account_not_found 404, which contradicts R1/AC1 (always the same 202 body) and enables account enumeration.",
       "location": "plan.md step 4",
-      "expected_lenses": [
-        "lens-consistency",
-        "lens-risk"
-      ],
+      "expected_lenses": ["lens-consistency", "lens-risk"],
       "severity": "blocker"
     },
     {
       "id": "D3",
-      "description": "Only the per-IP limit is implemented. The per-email limit of 5/hour from R5/AC5, which must hold across replicas and silently suppress the email, is missing. The plan also returns an error rather than 202 for limited requests.",
-      "location": "plan.md step 4",
-      "expected_lenses": [
-        "lens-spec-coverage",
-        "lens-risk"
-      ],
+      "description": "Only the per-IP limit (20/hour) is implemented. The per-email limit of 5/hour from R5/AC5, which must be a deployment-wide guarantee and must silently return 202 without sending, is missing from the request flow and from the tests.",
+      "location": "plan.md steps 4, 7; spec.md R5, AC5",
+      "expected_lenses": ["lens-spec-coverage", "lens-risk"],
       "severity": "major"
     },
     {
       "id": "D4",
-      "description": "Plan adds ioredis, a new redisLimiter.ts and a Redis instance. That contradicts the NFR of no new infrastructure this quarter, duplicates the existing FixedWindowLimiter, and widens the deploy (steps 9-10, rollout).",
+      "description": "Plan adds ioredis, a new src/lib/redisLimiter.ts, REDIS_URL and a Redis instance. That contradicts the NFR 'Postgres is the only datastore; no new infrastructure (Redis...)', duplicates the existing FixedWindowLimiter in src/lib/rateLimit.ts, and widens the deploy (steps 3, 9, 10, Rollout).",
       "location": "plan.md steps 3, 9, 10, Rollout; fixture/src/lib/rateLimit.ts; spec.md Non-functional constraints",
-      "expected_lenses": [
-        "lens-architecture",
-        "lens-consistency"
-      ],
+      "expected_lenses": ["lens-architecture", "lens-consistency"],
       "severity": "major"
     },
     {
       "id": "D5",
-      "description": "Confirm is check-then-act: findByToken, check used_at, update password, then markUsed. Two concurrent confirms can both pass the check and both change the password, violating AC3. It needs an atomic conditional consume (UPDATE ... WHERE used_at IS NULL AND expires_at > now() RETURNING).",
+      "description": "Confirm is check-then-act: findByToken, check usedAt/expiresAt in the service, update the password, then markUsed. Two concurrent confirms can both pass the check and both change the password, violating AC3. Consuming the token needs one atomic conditional write (UPDATE password_resets SET used_at = ... WHERE token_hash = $1 AND used_at IS NULL AND expires_at > ... RETURNING user_id) before the password change.",
       "location": "plan.md step 5",
-      "expected_lenses": [
-        "lens-risk"
-      ],
+      "expected_lenses": ["lens-risk"],
       "severity": "major"
     },
     {
       "id": "D6",
-      "description": "Tests do not cover expiry (AC4), concurrent double-use (AC3), the unknown-email response (AC1), or the per-email limit (AC5); the injected clock is not used in any test.",
-      "location": "plan.md Test strategy",
-      "expected_lenses": [
-        "lens-tests"
-      ],
+      "description": "Test strategy does not cover token expiry (AC4, 31 minutes), concurrent double confirm (AC3), the unknown-email response and no-mail behavior (AC1), or the per-email limit (AC5). The service takes an injected clock (like AuthService, whose tests pin it) but no test uses it.",
+      "location": "plan.md Test strategy; fixture/test/auth.test.ts; fixture/src/services/authService.ts",
+      "expected_lenses": ["lens-tests"],
       "severity": "major"
     },
     {
       "id": "D7",
-      "description": "Test strategy relies on a testcontainers Postgres+Redis suite, but the spec says CI runners have no Docker and service/route tests use the in-memory fakes.",
-      "location": "plan.md Test strategy; spec.md Non-functional constraints",
-      "expected_lenses": [
-        "lens-consistency",
-        "lens-tests"
-      ],
+      "description": "Plan's confirm route reads the body as { token, newPassword } and the service takes 'token', but spec R3 defines the body as {\"resetToken\", \"newPassword\"} and says the web client already sends those names; confirm would reject every real request.",
+      "location": "plan.md steps 5, 7; spec.md R3",
+      "expected_lenses": ["lens-consistency"],
+      "severity": "major"
+    },
+    {
+      "id": "D8",
+      "description": "The NFR 'tokens and passwords must never appear in logs' has no test: the plan explicitly skips log tests, relying on the shared logger's redaction, even though the fixture's server.ts error handler logs the full req.body on any unhandled error and the logger redacts only a fixed set of key names.",
+      "location": "plan.md Test strategy; fixture/src/lib/logger.ts; fixture/src/server.ts",
+      "expected_lenses": ["lens-tests"],
       "severity": "minor"
     }
   ],
   "tensions": [
     {
       "id": "T1",
-      "lenses": [
-        "lens-architecture",
-        "lens-risk"
-      ],
-      "related_defects": [
-        "D4",
-        "D3"
-      ],
-      "description": "Architecture's natural fix is to drop Redis and reuse the existing FixedWindowLimiter. Risk's natural fix is to add the missing per-email limit to the plan's limiter. Combine them and the per-email limit lives in a per-process Map on 3 replicas, so the effective limit is about 15/hour and resets on deploy, which fails AC5 ('whichever replica serves it'). The conflict only shows once you see that the fixture limiter is in-memory and the spec says 3 replicas.",
-      "lens_a_fix": "Remove ioredis and redisLimiter.ts; reuse FixedWindowLimiter from src/lib/rateLimit.ts as the login route does.",
-      "lens_b_fix": "Add a per-email (5/hour, silent) limit alongside the per-IP limit in the shared limiter.",
-      "reconciliation": "Keep the in-memory FixedWindowLimiter for the per-IP limit, which the spec calls best-effort. Enforce the per-email limit in Postgres by counting password_resets rows for the user created in the last hour before issuing a token, and return 202 without sending when over. No Redis, and AC5 holds across replicas.",
+      "lenses": ["lens-spec-coverage", "lens-architecture"],
+      "related_defects": ["D3", "D4"],
+      "description": "Spec-coverage's natural fix adds the missing per-email limit (5/hour, silent 202) as another key on the plan's limiter. Architecture's natural fix drops Redis and reuses FixedWindowLimiter. Combined, the per-email limit runs on FixedWindowLimiter, whose window state is the process-local Map that src/server.ts passes in (the WindowStore interface in rateLimit.ts is synchronous, so it cannot be backed by Postgres). With three replicas the effective limit is about 15/hour and resets on deploy, failing R5's deployment-wide guarantee and AC5. The spec-coverage lens sees R5/AC5 but not the limiter's storage; the architecture lens sees rateLimit.ts and the no-new-infrastructure NFR, and its own fix (IP limit on FixedWindowLimiter) is correct for what the plan has.",
+      "lens_a_fix": "Add a per-email limit (reset-email:<email>, 5/hour) to the request flow next to the IP limit; when over, return 202 and enqueue nothing; test the sixth request.",
+      "lens_b_fix": "Remove ioredis, redisLimiter.ts, REDIS_URL and the Redis instance; reuse FixedWindowLimiter from src/lib/rateLimit.ts for the request endpoint as the login route does.",
+      "reconciliation": "Keep FixedWindowLimiter (process-local Map) for the per-IP limit only, which R5 calls a coarse guard, and drop Redis. Enforce the per-email limit in Postgres: before issuing a token, count the user's password_resets rows with created_at in the last hour (the plan's (user_id, created_at) index serves this); if 5 or more, return 202 and send nothing. invalidateOpenForUser must mark earlier rows used rather than delete them so the count stays correct. Needs the spec side's fact (per-email is deployment-wide across replicas; Postgres is the only datastore) and the architecture side's fact (the limiter's state is a per-process Map supplied in server.ts and its store interface is synchronous).",
       "subtle": true
     },
     {
       "id": "T2",
-      "lenses": [
-        "lens-tests",
-        "lens-consistency"
-      ],
-      "related_defects": [
-        "D6",
-        "D7"
-      ],
-      "description": "Tests wants AC3 (concurrent confirms) and AC4 (expiry) covered, and the natural place to prove a DB-level race is the plan's testcontainers suite. Consistency wants that suite removed because CI has no Docker and the spec mandates fakes. Removing it without a replacement leaves the race untested.",
-      "lens_a_fix": "Add concurrent-confirm and expired-token tests to the Postgres integration suite.",
-      "lens_b_fix": "Drop the testcontainers suite; tests must run on the in-memory fakes.",
-      "reconciliation": "Make ResetRepo expose one atomic consume(tokenHash, now) operation, implemented in Postgres as a conditional UPDATE...RETURNING and in FakeResetRepo as compare-and-set. Test two concurrent confirms with Promise.all and expiry with the injected clock, both against fakes in CI. Check the SQL in code review or staging, not in CI.",
-      "subtle": false
+      "lenses": ["lens-risk", "lens-tests"],
+      "related_defects": ["D5", "D6"],
+      "description": "Risk's natural fix for the confirm race is a single conditional UPDATE ... WHERE used_at IS NULL AND expires_at > now() RETURNING, following the fixture's pg.ts style of using SQL now(). Tests' natural fix is to cover AC4 by advancing the service's injected clock 31 minutes (as auth.test.ts pins AuthService's clock) and AC3 with two concurrent confirms, against FakeResetRepo because CI has no Docker. Combined, expiry and single use are decided by the database clock inside SQL, the service's injected clock no longer takes part, and the fake-based AC4/AC3 tests exercise logic the production path does not use (or cannot be written against the service at all).",
+      "lens_a_fix": "Replace findByToken + markUsed with one atomic consume: UPDATE password_resets SET used_at = now() WHERE token_hash = $1 AND used_at IS NULL AND expires_at > now() RETURNING user_id, done before changing the password.",
+      "lens_b_fix": "Add fake-backed tests: a confirm with the injected clock set 31 minutes after issue returns invalid_token (AC4); two confirms via Promise.all yield exactly one password change (AC3).",
+      "reconciliation": "Give ResetRepo a consume(tokenHash, at: Date) method: Postgres runs UPDATE ... SET used_at = $2 WHERE token_hash = $1 AND used_at IS NULL AND expires_at > $2 RETURNING user_id, and the service passes this.now(); FakeResetRepo applies the same predicate and sets used_at with no await between check and set. The password changes only if consume returned a row. AC4 is then tested with the injected clock and AC3 with Promise.all on the fakes, and both exercise the predicate production uses. Needs risk's fact (only a single conditional write is atomic) and tests' fact (CI is fakes-only and time is controlled through the injected clock).",
+      "subtle": true
+    },
+    {
+      "id": "T3",
+      "lenses": ["lens-consistency", "lens-tests"],
+      "related_defects": ["D7", "D8"],
+      "description": "Consistency's natural fix renames the confirm body field from token to resetToken, as spec R3 requires. Tests' natural fix adds a log test proving the token is redacted, written against the plan's field name. The shared logger in src/lib/logger.ts redacts by key name and its set contains token and newPassword but not resetToken, and src/server.ts's error handler logs req.body for any unhandled error on confirm. After the rename, a raw reset token reaches the logs on any 500 while the redaction test (on key token) still passes, breaking the NFR that tokens never appear in logs.",
+      "lens_a_fix": "Read { resetToken, newPassword } in the confirm route and service to match spec R3 and the web client.",
+      "lens_b_fix": "Add a test that a failed confirm's log output has the token field redacted (e.g. logger output for { token: ... } shows [redacted]), instead of waiving log tests.",
+      "reconciliation": "Rename to resetToken per R3 and add resetToken to the logger's REDACT set (a shared-helper change that affects no existing caller), then test through the confirm route's error path (the server.ts handler that logs req.body) with the spec's field name, asserting the raw token value never appears in stdout. Needs consistency's fact (the real field name is resetToken) and the tests-side fixture fact (redaction is a fixed key-name set and the error handler logs whole bodies).",
+      "subtle": true
     }
   ]
 }

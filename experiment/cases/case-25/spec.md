@@ -23,8 +23,10 @@ App-store reviews keep mentioning late-night pushes. Let users choose which kind
 
 ## Non-functional constraints
 
-- The API image is the existing distroless static build.
-- Sender overhead p99 under 5 ms excluding the APNs/FCM call.
+- The API and push worker images stay on the existing distroless static build.
+- Sender overhead p99 under 5 ms excluding the push gateway call.
+- A saved document governs every push sent more than 60 seconds after the PUT returns.
+- Marketing opt-out is the user's consent record: a marketing push must never reach a user whose saved preferences turn marketing off.
 - No new external services.
 
 ## Out of scope

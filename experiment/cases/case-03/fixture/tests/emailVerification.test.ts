@@ -11,27 +11,29 @@ function setup(overrides: Partial<{ verified: boolean; consumeResult: any }> = {
     consume: vi.fn().mockResolvedValue(overrides.consumeResult ?? null),
     revokeAll: vi.fn().mockResolvedValue(undefined),
   };
-  const mailer = { send: vi.fn().mockResolvedValue(undefined) };
+  const jobs = { enqueue: vi.fn().mockResolvedValue(undefined) };
   const audit = { record: vi.fn() };
-  const svc = new EmailVerificationService(users as any, tokens as any, mailer, audit, "https://app.example.com");
-  return { svc, users, tokens, mailer, audit };
+  const svc = new EmailVerificationService(users as any, tokens as any, jobs as any, audit, "https://app.example.com");
+  return { svc, users, tokens, jobs, audit };
 }
 
 describe("EmailVerificationService", () => {
   it("revokes old tokens before issuing a new one", async () => {
-    const { svc, tokens, mailer } = setup();
+    const { svc, tokens, jobs } = setup();
     await svc.sendVerification("u1");
     expect(tokens.revokeAll).toHaveBeenCalledWith("u1", "email_verification");
     expect(tokens.issue.mock.invocationCallOrder[0]).toBeGreaterThan(tokens.revokeAll.mock.invocationCallOrder[0]);
-    expect(mailer.send).toHaveBeenCalledWith("verify_email", "a@example.com", {
-      link: "https://app.example.com/verify-email?token=tok123",
+    expect(jobs.enqueue).toHaveBeenCalledWith("send_mail", {
+      template: "verify_email",
+      to: "a@example.com",
+      vars: { link: "https://app.example.com/verify-email?token=tok123" },
     });
   });
 
   it("does nothing for already verified users", async () => {
-    const { svc, mailer } = setup({ verified: true });
+    const { svc, jobs } = setup({ verified: true });
     await svc.sendVerification("u1");
-    expect(mailer.send).not.toHaveBeenCalled();
+    expect(jobs.enqueue).not.toHaveBeenCalled();
   });
 
   it("rejects unknown or used tokens", async () => {

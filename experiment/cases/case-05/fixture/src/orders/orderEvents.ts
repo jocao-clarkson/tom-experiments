@@ -19,5 +19,5 @@ class OrderEvents extends EventEmitter {
   }
 }
 
-/** Process-wide order event bus. Listeners run synchronously in emit order. */
+/** Process-wide order event bus. */
 export const orderEvents = new OrderEvents();

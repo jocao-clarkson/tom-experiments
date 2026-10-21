@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 
 type KeysAPI struct {
 	Store store.Store
+	Audit audit.Writer
 	Clock clock.Clock
 	NewID func() string
 }
@@ -26,8 +28,7 @@ type keyResponse struct {
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 }
 
-// Create handles POST /v1/service-accounts/{id}/keys. Routed behind
-// RequireScope("keys:admin").
+// Create handles POST /v1/service-accounts/{id}/keys.
 func (a *KeysAPI) Create(w http.ResponseWriter, r *http.Request) {
 	accountID := r.PathValue("id")
 	var body struct {
@@ -44,18 +45,16 @@ func (a *KeysAPI) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	now := a.Clock.Now()
 	k := store.Key{ID: a.NewID(), AccountID: accountID, Prefix: gen.Prefix, Hash: gen.Hash, Scopes: body.Scopes, CreatedAt: now}
-	err = a.Store.WithTx(r.Context(), func(tx store.Store, ex store.Execer) error {
-		if err := tx.CreateKey(r.Context(), k); err != nil {
-			return err
-		}
-		return audit.RecordTx(r.Context(), ex, audit.Event{
-			Type: "key.created", ActorID: ActorID(r.Context()), AccountID: accountID, Subject: k.ID,
-			Metadata: map[string]string{"prefix": k.Prefix}, At: now,
-		})
-	})
-	if err != nil {
+	if err := a.Store.CreateKey(r.Context(), k); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal")
 		return
+	}
+	ev := audit.Event{
+		Type: "key.created", ActorID: ActorID(r.Context()), AccountID: accountID, Subject: k.ID,
+		Metadata: map[string]string{"prefix": k.Prefix}, At: now,
+	}
+	if err := a.Audit.Write(r.Context(), ev); err != nil {
+		log.Printf("keys: audit %s for %s: %v", ev.Type, k.ID, err)
 	}
 	writeJSON(w, http.StatusCreated, keyResponse{ID: k.ID, Prefix: k.Prefix, Plaintext: gen.Plaintext, Scopes: k.Scopes, CreatedAt: now})
 }

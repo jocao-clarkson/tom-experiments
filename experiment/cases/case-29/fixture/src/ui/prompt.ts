@@ -1,5 +1,4 @@
 import { createInterface } from "node:readline/promises";
-import { AbortError } from "../errors.js";
 
 export interface ConfirmOptions {
   yes: boolean;
@@ -8,16 +7,17 @@ export interface ConfirmOptions {
   output?: NodeJS.WritableStream;
 }
 
-/** Ask y/N. --yes skips the prompt; a non-interactive session without --yes aborts. */
-export async function confirm(question: string, opts: ConfirmOptions): Promise<void> {
-  if (opts.yes) return;
-  if (!opts.isTTY) {
-    throw new AbortError("refusing to continue without confirmation in a non-interactive session; pass --yes");
-  }
+/**
+ * Ask a y/N question. Resolves true when --yes was given or the user answers
+ * y/yes. Resolves false otherwise, including when there is no terminal to ask on.
+ */
+export async function confirm(question: string, opts: ConfirmOptions): Promise<boolean> {
+  if (opts.yes) return true;
+  if (!opts.isTTY) return false;
   const rl = createInterface({ input: opts.input ?? process.stdin, output: opts.output ?? process.stderr });
   try {
     const answer = (await rl.question(`${question} [y/N] `)).trim().toLowerCase();
-    if (answer !== "y" && answer !== "yes") throw new AbortError();
+    return answer === "y" || answer === "yes";
   } finally {
     rl.close();
   }

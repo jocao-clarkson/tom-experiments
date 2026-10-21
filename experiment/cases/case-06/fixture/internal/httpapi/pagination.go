@@ -19,12 +19,18 @@ var errBadCursor = errors.New("invalid cursor")
 // Cursor is the keyset position after the last row of a page, for lists
 // ordered by (created_at DESC, id DESC).
 type Cursor struct {
-	CreatedAt time.Time `json:"c"`
-	ID        string    `json:"i"`
+	CreatedAt time.Time
+	ID        string
+}
+
+// wireCursor is the compact form handed to clients.
+type wireCursor struct {
+	C int64  `json:"c"`
+	I string `json:"i"`
 }
 
 func encodeCursor(c Cursor) string {
-	b, _ := json.Marshal(c)
+	b, _ := json.Marshal(wireCursor{C: c.CreatedAt.UnixMilli(), I: c.ID})
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
@@ -36,11 +42,11 @@ func decodeCursor(s string) (*Cursor, error) {
 	if err != nil {
 		return nil, errBadCursor
 	}
-	var c Cursor
-	if err := json.Unmarshal(b, &c); err != nil || c.ID == "" {
+	var wc wireCursor
+	if err := json.Unmarshal(b, &wc); err != nil || wc.I == "" {
 		return nil, errBadCursor
 	}
-	return &c, nil
+	return &Cursor{CreatedAt: time.UnixMilli(wc.C).UTC(), ID: wc.I}, nil
 }
 
 // parseLimit reads ?limit=, defaulting to 50 and rejecting values outside 1..200.

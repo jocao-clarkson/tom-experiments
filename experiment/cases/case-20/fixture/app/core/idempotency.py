@@ -1,21 +1,18 @@
 """Idempotency-Key support for mutating endpoints.
 
-Responses are stored per (user, key) for settings.idempotency_ttl_hours. A repeated request
-with the same key gets the stored status and body without re-running the handler.
+Responses are stored per (user, key). A repeated request with the same key gets the stored
+status and body without re-running the handler.
 """
 import json
 
 from fastapi import Request, Response
 from sqlalchemy import text
 
-from app.core.settings import settings
-
 
 async def replay_or_none(session, user_id: str, key: str) -> Response | None:
     row = (await session.execute(
-        text("SELECT status, body FROM idempotency_keys WHERE user_id = :u AND key = :k "
-             "AND created_at > now() - make_interval(hours => :h)"),
-        {"u": user_id, "k": key, "h": settings.idempotency_ttl_hours},
+        text("SELECT status, body FROM idempotency_keys WHERE user_id = :u AND key = :k"),
+        {"u": user_id, "k": key},
     )).first()
     if row is None:
         return None

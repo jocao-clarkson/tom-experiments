@@ -31,7 +31,7 @@ describe("AuthService.login", () => {
 describe("FixedWindowLimiter", () => {
   it("blocks after the limit within a window", () => {
     let t = 0;
-    const l = new FixedWindowLimiter(2, 1000, () => t);
+    const l = new FixedWindowLimiter(2, 1000, new Map(), () => t);
     expect(l.hit("k").allowed).toBe(true);
     expect(l.hit("k").allowed).toBe(true);
     expect(l.hit("k").allowed).toBe(false);

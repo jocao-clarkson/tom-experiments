@@ -25,16 +25,25 @@ func Line(s string) (string, int) {
 	return s, hits
 }
 
-// Lines reads r fully and returns the scrubbed lines with the total hit count.
-func Lines(r io.Reader) ([]string, int, error) {
-	sc := bufio.NewScanner(r)
+// Copy scrubs src line by line into dst and returns the total hit count.
+// Each output line is terminated with "\n".
+func Copy(dst io.Writer, src io.Reader) (int, error) {
+	sc := bufio.NewScanner(src)
 	sc.Buffer(make([]byte, 64*1024), 1024*1024)
-	var out []string
+	w := bufio.NewWriter(dst)
 	total := 0
 	for sc.Scan() {
 		line, n := Line(sc.Text())
-		out = append(out, line)
 		total += n
+		if _, err := w.WriteString(line); err != nil {
+			return total, err
+		}
+		if err := w.WriteByte('\n'); err != nil {
+			return total, err
+		}
 	}
-	return out, total, sc.Err()
+	if err := sc.Err(); err != nil {
+		return total, err
+	}
+	return total, w.Flush()
 }

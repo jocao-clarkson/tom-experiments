@@ -39,3 +39,15 @@ func (c *Counter) Value(stream string) int64 {
 	defer c.mu.Unlock()
 	return c.vals[stream]
 }
+
+var (
+	rowsIngested     = NewCounter("rows_ingested")
+	rowsDeadLettered = NewCounter("rows_dead_lettered")
+)
+
+// RecordBatch counts the rows written and dead-lettered for one committed
+// batch of a stream.
+func RecordBatch(stream string, written, deadLettered int) {
+	rowsIngested.Add(stream, written)
+	rowsDeadLettered.Add(stream, deadLettered)
+}

@@ -28,16 +28,14 @@ def get_settings() -> Settings:
 
 
 @dataclass(frozen=True)
-class Argon2Params:
-    time_cost: int
-    memory_kib: int
-    parallelism: int
+class HashParams:
+    algorithm: str
+    iterations: int
 
 
 @lru_cache
-def argon2_params() -> Argon2Params:
-    return Argon2Params(
-        time_cost=int(os.environ.get("ARGON2_TIME_COST", "3")),
-        memory_kib=int(os.environ.get("ARGON2_MEMORY_KIB", "65536")),
-        parallelism=int(os.environ.get("ARGON2_PARALLELISM", "2")),
+def hash_params() -> HashParams:
+    return HashParams(
+        algorithm=os.environ.get("HASH_ALGORITHM", "sha256"),
+        iterations=int(os.environ.get("HASH_ITERATIONS", "600000")),
     )

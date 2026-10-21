@@ -44,7 +44,7 @@ func (r *Repo) one(ctx context.Context, q string, arg string) (User, error) {
 	return u, err
 }
 
-// SetPassword validates, hashes and stores a new password and bumps password_changed_at.
+// SetPassword validates, hashes and stores a new password.
 func (r *Repo) SetPassword(ctx context.Context, id, plain string) error {
 	if err := ValidatePassword(plain); err != nil {
 		return err

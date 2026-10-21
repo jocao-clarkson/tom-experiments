@@ -21,12 +21,13 @@ Users who forget their password currently have to contact support. We will add a
 - **AC2.** The email for a known account contains a link whose token works once, and fails with `invalid_token` after 30 minutes.
 - **AC3.** After a successful confirm, a request using a session cookie issued before the reset gets `401`.
 - **AC4.** A sixth request for the same email within an hour sends no email.
+- **AC5.** A confirm whose new password fails the policy returns `422`, and the same link then succeeds with a valid password.
 
 ## Non-functional constraints
 
-- Store only a SHA-256 hash of the reset token, never the token itself.
+- The raw reset token appears only in the emailed link. Persist only its SHA-256 hash.
 - Response time of the request endpoint must not reveal whether an account exists; mail delivery must not happen on the request path.
-- Use the existing password policy (`user.ValidatePassword`) and password storage (`Repo.SetPassword`).
+- Use the existing password policy and password storage (`Repo.SetPassword`).
 - Production Redis holds about 4 million live sessions; avoid operations that scale with the total number of sessions.
 - `go test ./...` must not require network access or external services.
 

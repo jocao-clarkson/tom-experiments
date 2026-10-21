@@ -2,7 +2,7 @@
 
 ## Overview
 
-Add `Rotate` and `Revoke` handlers to `KeysAPI` in `internal/httpapi/keys.go`, routed behind `RequireScope("keys:admin")`. Rotation creates the replacement key and sets the old key's expiry in one transaction. Revocation marks the key and clears it from the verifier cache so it stops working right away. Audit events are written after each change.
+Add `Rotate` and `Revoke` handlers to `KeysAPI` in `internal/httpapi/keys.go`, routed behind `RequireScope("keys:admin")`. Rotation creates the replacement key and sets the old key's expiry in one transaction. Revocation marks the key and clears it from the verifier cache so it stops working right away. Each change writes an audit event.
 
 ## Steps
 
@@ -16,23 +16,25 @@ Add `Rotate` and `Revoke` handlers to `KeysAPI` in `internal/httpapi/keys.go`, r
 
 5. **Response.** Return 201 with `key` (including `plaintext`) and `previous` (`id`, `expires_at`), reusing `keyResponse` for the new key.
 
-6. **Revoke.** `Revoke` loads the key, checks the account, calls `Store.Revoke(id, now)`, and then evicts the key from the verifier cache so the next request fails immediately.
+6. **Revoke.** `Revoke` loads the key, checks the account, calls `Store.Revoke(id, now)`, and then evicts the key from the verifier cache so the next request with it fails.
 
-7. **Cache access.** The verifier's cache is unexported, so export it as `Verifier.Cache` with a `Delete(hash)` method, and give `KeysAPI` a `Verifier *apikey.Verifier` field so `Revoke` can call `a.Verifier.Cache.Delete(...)`.
+7. **Cache access.** The verifier's cache is unexported, so export it as `Verifier.Cache` with a `Delete(hash)` method, and give `KeysAPI` a `Verifier *apikey.Verifier` field, set to the same verifier passed to `Routes`, so `Revoke` can call `a.Verifier.Cache.Delete(...)`.
 
-8. **Audit.** After the transaction commits, insert `key.rotated` or `key.revoked` into `audit_events` directly with `a.Store.(store.Execer).Exec(...)`. Metadata includes the account id, both key ids, and the rotate response payload for traceability. If the audit insert fails, log it at ERROR and still return success, so an audit-table problem does not block customers mid-incident.
+8. **Audit events.** Once the change has committed, insert `key.rotated` or `key.revoked` into `audit_events` with `a.Store.(store.Execer).Exec(...)`. Metadata carries the account id, both key ids, and the rotate response payload for traceability.
 
-9. **Routing.** Register both routes in the router behind `Authenticate` and `RequireScope("keys:admin")`.
+9. **Error handling.** Unknown or foreign keys return 404, the checks in step 2 return 409, and store errors return 500 with the transaction rolled back. An audit insert error is logged at ERROR with the key id and the request still returns success, so an audit-table problem never blocks a customer who is rotating a leaked key mid-incident.
 
-10. **Docs.** Update the public API reference and the "Rotating keys" console help page.
+10. **Routing.** Register both routes in `httpapi.Routes` (`internal/httpapi/router.go`) behind `Authenticate` and `RequireScope("keys:admin")`, next to the existing create route.
+
+11. **Docs.** Update the public API reference and the "Rotating keys" console help page.
 
 ## Test strategy
 
-- `internal/httpapi/keys_test.go` with an in-memory `store.Store` and `clock.Fixed`:
+- `internal/httpapi/keys_test.go`, reusing the existing `fakeStore` and `clock.Fixed`:
   - Rotate returns 201 with both sections; the old key now has `expires_at = now + 24h`.
   - Rotating the same key again returns 409 (AC5).
-  - `grace_hours: 169` returns 400; a key without `keys:admin` gets 403 (AC4).
-  - Revoke followed by `Verifier.Verify` on the same instance returns `ErrInvalid` (AC2).
+  - `grace_hours: 169` returns 400; a key without `keys:admin` gets 403 when called through `Routes` (AC4).
+  - Revoke followed by `Verifier.Verify` on the same verifier returns `ErrInvalid` (AC2).
 - `internal/apikey/apikey_test.go`: add a case for `Cache.Delete`.
 - AC1 is checked by advancing `clock.Fixed` past the grace period and calling `Verify` on the old key.
 

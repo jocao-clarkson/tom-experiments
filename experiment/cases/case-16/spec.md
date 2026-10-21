@@ -26,7 +26,7 @@ Pricing Ops reprices whole categories at once (seasonal sales, supplier changes)
 ## Non-functional constraints
 
 - A 500-item request must complete in under 2 seconds at p95.
-- The checkout service reads prices from the same `products` rows, so row locks must be held as briefly as possible; long lock waits show up as checkout latency.
+- Downstream consumers of `price_changed` (search indexing, price history) must not need any changes to handle bulk updates.
 - No new infrastructure or third-party dependencies.
 
 ## Out of scope

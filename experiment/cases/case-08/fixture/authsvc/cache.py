@@ -5,18 +5,11 @@ from typing import Any, Callable, Hashable
 
 
 class TTLMemo:
-    """Small in-process LRU memo with per-entry expiry, for hot lookups."""
+    """Small in-process LRU memo; each entry expires ttl seconds after it was loaded."""
 
-    def __init__(
-        self,
-        ttl: float,
-        maxsize: int = 1024,
-        refresh_on_hit: bool = True,
-        clock: Callable[[], float] = time.monotonic,
-    ):
+    def __init__(self, ttl: float, maxsize: int = 1024, clock: Callable[[], float] = time.monotonic):
         self._ttl = ttl
         self._maxsize = maxsize
-        self._refresh_on_hit = refresh_on_hit
         self._clock = clock
         self._data: OrderedDict[Hashable, tuple[Any, float]] = OrderedDict()
         self._lock = threading.Lock()
@@ -26,8 +19,6 @@ class TTLMemo:
         with self._lock:
             entry = self._data.get(key)
             if entry is not None and entry[1] > now:
-                if self._refresh_on_hit:
-                    self._data[key] = (entry[0], now + self._ttl)
                 self._data.move_to_end(key)
                 return entry[0]
         value = loader()

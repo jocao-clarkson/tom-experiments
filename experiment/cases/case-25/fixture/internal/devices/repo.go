@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"time"
+
+	"github.com/pebbleapp/api/internal/cache"
 )
 
 type Device struct {
@@ -58,4 +60,39 @@ func (r *SQLRepo) ListForUser(ctx context.Context, userID string) ([]Device, err
 		out = append(out, d)
 	}
 	return out, rows.Err()
+}
+
+// CachedRepo serves ListForUser from a TTL cache keyed by user ID. Writes
+// through it drop that user's entry.
+type CachedRepo struct {
+	Repo
+	cache *cache.TTL[string, []Device]
+}
+
+func NewCachedRepo(r Repo, c *cache.TTL[string, []Device]) *CachedRepo {
+	return &CachedRepo{Repo: r, cache: c}
+}
+
+func (r *CachedRepo) ListForUser(ctx context.Context, userID string) ([]Device, error) {
+	if devs, ok := r.cache.Get(userID); ok {
+		return devs, nil
+	}
+	devs, err := r.Repo.ListForUser(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	r.cache.Set(userID, devs)
+	return devs, nil
+}
+
+func (r *CachedRepo) Upsert(ctx context.Context, d Device) error {
+	err := r.Repo.Upsert(ctx, d)
+	r.cache.Delete(d.UserID)
+	return err
+}
+
+func (r *CachedRepo) Delete(ctx context.Context, userID, token string) error {
+	err := r.Repo.Delete(ctx, userID, token)
+	r.cache.Delete(userID)
+	return err
 }

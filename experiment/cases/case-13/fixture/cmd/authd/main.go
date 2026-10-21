@@ -25,10 +25,9 @@ func main() {
 	users := user.NewRepo(db)
 	sessions := session.NewRedisStore(rdb)
 	mail := notify.NewQueue(newSESSender(), 1000)
-	_ = mail
 
 	mux := http.NewServeMux()
-	mux.Handle("POST /login", httpx.RateLimit(httpx.ClientIP, 30, time.Minute, loginHandler(users, sessions)))
+	mux.Handle("POST /login", httpx.RateLimit(httpx.ClientIP, 30, time.Minute, loginHandler(users, sessions, mail)))
 	mux.Handle("GET /me", httpx.RequireAuth(sessions, users, meHandler()))
 
 	log.Fatal(http.ListenAndServe(":8080", mux))

@@ -5,22 +5,22 @@
   "defects": [
     {
       "id": "D1",
-      "description": "Plan builds a separate purchases package (loop.go, writer.go) that duplicates the generic pipeline.Runner (poll, transform, write, DLQ, commit, metrics) and bypasses the sink.Warehouse interface. Purchases need only a new TransformFunc and a Runner instance.",
-      "location": "plan.md overview, steps 3-4, 9; fixture/internal/pipeline/runner.go; fixture/internal/sink/warehouse.go",
+      "description": "Plan builds a separate purchases package (loop.go with its own poll/transform/write/DLQ/commit/metrics loop, writer.go with its own SQL) that duplicates pipeline.Runner and sink.PostgresWarehouse. The writer in step 3 (per-row INSERT ... ON CONFLICT (event_id) DO UPDATE SET every non-key column = EXCLUDED, one transaction per batch) is the same as sink.PostgresWarehouse with OnConflict: sink.Overwrite. Purchases need only a TransformFunc and a Runner instance.",
+      "location": "plan.md overview, steps 3-4, 8-9; fixture/internal/pipeline/runner.go; fixture/internal/sink/warehouse.go",
       "expected_lenses": ["lens-architecture"],
       "severity": "major"
     },
     {
       "id": "D2",
-      "description": "The new writer uses a plain multi-row INSERT with no conflict handling or revision guard. A redelivered batch either duplicates rows or, given the unique key on event_id, fails, and corrected revisions are never applied. This breaks R6, AC1 and AC2.",
-      "location": "plan.md step 3; spec.md R6, AC1, AC2",
+      "description": "The writer's ON CONFLICT (event_id) DO UPDATE overwrites the stored row unconditionally, with no check on revision. A redelivered or late older revision replaces a newer one, which breaks R6 ('must not roll a row back to an older revision') and AC2 (revision 2 then revision 1 must leave revision 2). A guard such as WHERE purchases.revision < EXCLUDED.revision is missing.",
+      "location": "plan.md step 3; spec.md R6, AC2; fixture/internal/source/source.go (at-least-once redelivery)",
       "expected_lenses": ["lens-risk", "lens-consistency"],
       "severity": "blocker"
     },
     {
       "id": "D3",
-      "description": "Write failures are retried forever with a fixed 2s sleep that ignores ctx. This goes against the bounded retry policy, ignores the existing retry.Do helper and WriteAttempts config, and on a permanent error such as a unique-key violation it stalls the stream silently while lag grows.",
-      "location": "plan.md step 7; fixture/internal/retry/retry.go; spec.md non-functional constraints",
+      "description": "Write failures are retried forever with a fixed 2s sleep that ignores ctx. This goes against the spec's bounded, configurable retry policy, ignores retry.Do and Config.WriteAttempts/RetryBase, and on a permanent error stalls the stream silently while lag grows past the 2-minute budget.",
+      "location": "plan.md step 7; fixture/internal/retry/retry.go; fixture/internal/config/config.go; spec.md non-functional constraints",
       "expected_lenses": ["lens-risk"],
       "severity": "major"
     },
@@ -33,30 +33,30 @@
     },
     {
       "id": "D5",
-      "description": "AC1/AC2 (replay idempotency, highest revision wins) are 'tested' only by a fake writer that records calls. That cannot show the table ends up with one row at the highest revision, so the main correctness property is untested.",
-      "location": "plan.md test strategy",
+      "description": "AC1/AC2 (replay leaves table unchanged; highest revision wins) are 'tested' only with a fake writer that records calls. That cannot show the table ends up with one row at the highest revision, since the property lives in the SQL conflict handling, so the main correctness property is untested.",
+      "location": "plan.md test strategy (third bullet)",
       "expected_lenses": ["lens-tests"],
       "severity": "major"
     },
     {
       "id": "D6",
-      "description": "Step 10 adds a CI job with a Postgres service container, which changes CI configuration/infrastructure. The spec explicitly puts this out of scope (owned by DevEx).",
-      "location": "plan.md step 10; spec.md non-functional constraints and out of scope",
-      "expected_lenses": ["lens-spec-coverage"],
+      "description": "Amounts are parsed with strconv.ParseFloat and converted with int64(math.Round(f * 100)). Float parsing of money plus rounding silently changes amounts that carry more fractional digits than expected (for example \"12.345\" becomes 1235) and loses precision on large values, instead of rejecting them. Amounts should be parsed exactly from the decimal string, with excess precision rejected as invalid_amount.",
+      "location": "plan.md step 2",
+      "expected_lenses": ["lens-risk"],
       "severity": "major"
     },
     {
       "id": "D7",
-      "description": "Only rows_ingested is emitted; R7 also requires rows_dead_lettered.",
-      "location": "plan.md step 8; spec.md R7",
-      "expected_lenses": ["lens-spec-coverage"],
-      "severity": "minor"
+      "description": "The plan hardcodes a factor of 100 for amount_cents, assuming every currency has two decimal places. The spec's goal says purchases are priced in USD, EUR, GBP, JPY and KWD; JPY has no minor unit (exponent 0) and KWD has three (exponent 3), so JPY amounts are stored 100x too large and KWD amounts lose a digit. The plan does not say how amount_cents is defined for these currencies.",
+      "location": "plan.md step 2; spec.md goal, R2",
+      "expected_lenses": ["lens-consistency"],
+      "severity": "major"
     },
     {
       "id": "D8",
-      "description": "Amounts are parsed with strconv.ParseFloat and multiplied by 100, which can mis-round decimal money values. Strings should be parsed as decimals or as integer parts.",
-      "location": "plan.md step 2",
-      "expected_lenses": ["lens-risk"],
+      "description": "R7 requires both rows_ingested and rows_dead_lettered, with dead-lettered rows broken down by reason code. Step 8 emits only rows_ingested; rows_dead_lettered and the per-reason breakdown are missing.",
+      "location": "plan.md step 8; spec.md R7",
+      "expected_lenses": ["lens-spec-coverage"],
       "severity": "minor"
     }
   ],
@@ -65,30 +65,30 @@
       "id": "T1",
       "lenses": ["lens-architecture", "lens-risk"],
       "related_defects": ["D1", "D2"],
-      "description": "Architecture's natural fix is to drop the custom writer and use sink.Warehouse.WriteBatch through the existing Runner. But WriteBatch uses ON CONFLICT (event_id) DO NOTHING, which silently drops corrected higher revisions, so R6/AC2 still fail. Risk's natural fix is a revision-aware upsert, which WriteBatch cannot express. The conflict only shows up after reading the fixture's SQL.",
-      "lens_a_fix": "Delete internal/purchases/writer.go and loop.go and run purchases through pipeline.Runner with sink.Warehouse.WriteBatch.",
-      "lens_b_fix": "Write purchases with INSERT ... ON CONFLICT (event_id) DO UPDATE ... WHERE purchases.revision < EXCLUDED.revision.",
-      "reconciliation": "Reuse pipeline.Runner and the sink package, but extend sink with a revision-aware upsert (for example an UpsertBatch with a version column, or a per-table conflict policy) rather than adding a parallel writer. Clicks keep DO NOTHING; purchases get the guarded DO UPDATE.",
+      "description": "Architecture sees that the step 3 writer is exactly sink.PostgresWarehouse with OnConflict: sink.Overwrite (documented 'for streams whose events are corrected upstream') and that loop.go duplicates pipeline.Runner, so its natural fix is to delete both and use Runner with an Overwrite sink. Risk sees that unconditional overwrite rolls rows back to older revisions on redelivery (R6, AC2, source.go at-least-once) and patches the plan's writer with a revision guard. Architecture's fix keeps the rollback bug, because Overwrite has no guard; risk's fix keeps the duplicate writer. The conflict only appears once the plan's SQL is compared with sink's Overwrite policy.",
+      "lens_a_fix": "Delete internal/purchases/writer.go and loop.go; run purchases through pipeline.Runner with &sink.PostgresWarehouse{DB: db, OnConflict: sink.Overwrite}.",
+      "lens_b_fix": "Change the writer's SQL to INSERT ... ON CONFLICT (event_id) DO UPDATE SET ... WHERE purchases.revision < EXCLUDED.revision.",
+      "reconciliation": "Reuse pipeline.Runner and sink, but add a version-guarded conflict policy to sink (for example OverwriteIfNewer with a version column, generating DO UPDATE ... WHERE <table>.revision < EXCLUDED.revision) instead of keeping a parallel writer or using plain Overwrite. Because Runner writes the DLQ through the same Sink and purchases_dlq has no revision column, the policy must be chosen per table (guarded upsert for purchases, SkipExisting for purchases_dlq). Needs architecture's fact (Runner/sink and its ConflictPolicy extension point already exist) and risk's fact (older revisions can arrive after newer ones, so overwrite must be conditional on revision).",
       "subtle": true
     },
     {
       "id": "T2",
       "lenses": ["lens-risk", "lens-consistency"],
-      "related_defects": ["D3", "D4"],
-      "description": "Risk's natural fix for the infinite retry is to bound attempts and, once they are exhausted, dead-letter or skip the batch and keep going so lag stays bounded. Consistency insists that offsets are committed only after a durable write (R5, AC4) and that only the three invalid-record reasons go to the DLQ (R3). Skipping or dead-lettering valid rows after bounded retries breaks both.",
-      "lens_a_fix": "Use retry.Do with WriteAttempts; if it still fails, move the batch to purchases_dlq, commit, and continue.",
-      "lens_b_fix": "Never commit offsets before a successful write, and never send valid events to the DLQ.",
-      "reconciliation": "Bound retries with retry.Do and the configured WriteAttempts. On exhaustion, return an error from the runner without committing, as the existing Runner does, so the process restarts from the last committed offset, and alert on it. Commit only after the write succeeds and keep the DLQ for R3 reasons only.",
-      "subtle": false
+      "related_defects": ["D6", "D7"],
+      "description": "Risk's natural fix for float rounding is to parse the decimal string exactly and reject any amount with more than two fractional digits as invalid_amount. Consistency's natural fix is to scale by each currency's ISO 4217 exponent, because the goal lists JPY (0) and KWD (3). Applied together as written, every valid three-decimal KWD amount is dead-lettered as invalid_amount; consistency's fix alone, applied to the plan's ParseFloat/Round code, keeps the silent rounding. The two fixes conflict on the precision limit.",
+      "lens_a_fix": "Replace ParseFloat/math.Round with exact decimal parsing and reject amounts with more than two fractional digits as invalid_amount.",
+      "lens_b_fix": "Multiply by 10^exponent for the event's currency (JPY 0, KWD 3, others 2) instead of a fixed 100.",
+      "reconciliation": "Parse the amount string exactly (integer and fraction digits, no float), look up the currency's minor-unit exponent from a table covering the goal's currencies (USD/EUR/GBP 2, JPY 0, KWD 3), scale by that exponent, and reject as invalid_amount only when the fraction has more digits than that currency allows. Needs risk's fact (rounding must become rejection, no floats) and consistency's fact (the in-scope currencies and their differing exponents), and the precision limit must be per currency rather than a fixed 2.",
+      "subtle": true
     },
     {
       "id": "T3",
-      "lenses": ["lens-tests", "lens-spec-coverage"],
-      "related_defects": ["D5", "D6"],
-      "description": "Tests wants AC1/AC2 checked against real database semantics (conflict and revision handling), which in the plan relies on the new Postgres CI job. Coverage flags that CI job as an out-of-scope change. Removing it, as coverage would, leaves the main correctness property untested, which is what tests is objecting to.",
-      "lens_a_fix": "Add an integration test against a real Postgres that replays batches and delivers revisions out of order.",
-      "lens_b_fix": "Remove the CI workflow change from the plan.",
-      "reconciliation": "Drop the CI change. Unit-test the generated upsert SQL and the revision rule in the sink package with a statement-recording fake, keep the integration test behind a build tag runnable locally, and add a staging verification step (replay plus out-of-order revision) to rollout. If real-DB CI coverage is wanted, raise it with DevEx.",
+      "lenses": ["lens-spec-coverage", "lens-architecture"],
+      "related_defects": ["D8", "D1"],
+      "description": "Coverage's natural fix is to add rows_dead_lettered, labelled by stream and reason, to the purchases loop in step 8. Architecture's natural fix is to delete that loop and use pipeline.Runner, which already records rows_ingested and rows_dead_lettered. But Runner calls metrics.RecordBatch(stream, written, deadLettered), and metrics.Counter carries a single stream label, so dead-lettered rows are counted per stream only and R7's per-reason breakdown is lost. Coverage's fix lives in code architecture removes; architecture's replacement does not meet R7.",
+      "lens_a_fix": "Add rows_dead_lettered with stream and reason labels in internal/purchases/loop.go next to rows_ingested.",
+      "lens_b_fix": "Remove internal/purchases/loop.go and run purchases through pipeline.Runner, which already emits both counters.",
+      "reconciliation": "Reuse pipeline.Runner, and extend the shared metrics path so Runner records dead-lettered rows per reason (for example a reason-labelled counter or RecordBatch taking the rejected reasons, since metrics.Counter.Add only takes a stream), instead of keeping a purchases loop for metrics. Clicks gain the per-reason breakdown too, which is harmless. Needs coverage's fact (R7 requires per-reason counts) and architecture's fact (Runner already emits the counters, but metrics only supports a stream label).",
       "subtle": false
     }
   ]

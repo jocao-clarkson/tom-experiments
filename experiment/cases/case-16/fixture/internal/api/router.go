@@ -10,5 +10,6 @@ func NewRouter(products *ProductsHandler, authenticate func(http.Handler) http.H
 	mux := http.NewServeMux()
 	mux.Handle("GET /v1/products/{sku}", http.HandlerFunc(products.Get))
 	mux.Handle("PATCH /v1/products/{sku}/price", auth.RequireScope("catalog:write", http.HandlerFunc(products.UpdatePrice)))
+	mux.Handle("POST /internal/v1/quote", auth.RequireScope("checkout:quote", http.HandlerFunc(products.Quote)))
 	return authenticate(mux)
 }

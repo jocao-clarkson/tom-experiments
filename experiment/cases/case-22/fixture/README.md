@@ -19,4 +19,4 @@ Run with `revpipe <job>`. Each job is safe to re-run over the same files.
 | `REVPIPE_DEADLETTER_DIR` | `/data/deadletter` |
 | `REVPIPE_BATCH_SIZE` | `500` |
 
-Migrations in `migrations/` are applied by the platform migration runner before deploy.
+Migrations in `migrations/` are applied by the platform migration runner before deploy. Each job runs as a CronJob defined in `deploy/`.

@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ledgerly/iam/internal/clock"
@@ -49,9 +50,6 @@ type Verifier struct {
 // NewVerifier builds the request-path verifier. Successful verifications are
 // cached for cacheTTL so that steady traffic does not hit the database.
 func NewVerifier(s store.Store, c clock.Clock, cacheTTL time.Duration) *Verifier {
-	if cacheTTL == 0 {
-		cacheTTL = 10 * time.Minute
-	}
 	return &Verifier{store: s, clock: c, cache: newTTLCache(cacheTTL, c)}
 }
 
@@ -74,4 +72,36 @@ func (v *Verifier) Verify(ctx context.Context, plaintext string) (store.Key, err
 	}
 	v.cache.put(cacheKey, k)
 	return k, nil
+}
+
+type entry struct {
+	key     store.Key
+	expires time.Time
+}
+
+type ttlCache struct {
+	mu    sync.RWMutex
+	ttl   time.Duration
+	clock clock.Clock
+	items map[string]entry
+}
+
+func newTTLCache(ttl time.Duration, c clock.Clock) *ttlCache {
+	return &ttlCache{ttl: ttl, clock: c, items: map[string]entry{}}
+}
+
+func (c *ttlCache) get(k string) (store.Key, bool) {
+	c.mu.RLock()
+	e, ok := c.items[k]
+	c.mu.RUnlock()
+	if !ok || !c.clock.Now().Before(e.expires) {
+		return store.Key{}, false
+	}
+	return e.key, true
+}
+
+func (c *ttlCache) put(k string, v store.Key) {
+	c.mu.Lock()
+	c.items[k] = entry{key: v, expires: c.clock.Now().Add(c.ttl)}
+	c.mu.Unlock()
 }

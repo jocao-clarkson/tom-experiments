@@ -2,10 +2,11 @@ import { Router, type Request } from "express";
 import { intParam, requiredString } from "../lib/validate";
 import type { Actor, KeyService } from "../keys/keyService";
 import type { KeyRepo } from "../keys/keyRepo";
+import type { VerifyCache } from "../keys/verifyCache";
 
 const actorOf = (req: Request) => (req as Request & { actor: Actor }).actor;
 
-export function keysRouter(service: KeyService, repo: KeyRepo): Router {
+export function keysRouter(service: KeyService, repo: KeyRepo, cache: VerifyCache): Router {
   const r = Router();
 
   r.post("/", async (req, res, next) => {
@@ -25,6 +26,7 @@ export function keysRouter(service: KeyService, repo: KeyRepo): Router {
       if (!key) return res.status(404).json({ error: "not_found" });
       service.assertCanManage(actorOf(req), key);
       await repo.setStatus(key.id, "revoked");
+      cache.evict(key.id);
       res.status(204).end();
     } catch (err) {
       next(err);

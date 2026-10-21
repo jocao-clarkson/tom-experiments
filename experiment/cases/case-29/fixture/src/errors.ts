@@ -11,7 +11,7 @@ export class UsageError extends CliError {
   }
 }
 
-/** The user (or a non-interactive session) declined to continue. Exit 1. */
+/** The operation was not confirmed. Exit 1. */
 export class AbortError extends CliError {
   constructor(message = "Aborted.") {
     super(message, 1);

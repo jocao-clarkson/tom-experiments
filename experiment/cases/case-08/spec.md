@@ -14,7 +14,7 @@ Customers' CI systems and back-office scripts currently sign in with a human adm
 - **R3.** A request with `Authorization: Bearer sk_live_...` is authenticated as a `service_account` principal for the key's org, carrying exactly the key's scopes. Existing user JWT authentication keeps working unchanged.
 - **R4.** `DELETE /orgs/{org_id}/api-keys/{id}` revokes a key. Requests using a revoked key must be rejected **within 60 seconds** of revocation.
 - **R5.** Each key has a `last_used_at` timestamp, updated at most once per minute per key. It is shown in `GET /orgs/{org_id}/api-keys`, which never returns secrets.
-- **R6.** Creating and revoking keys write audit events `api_key.created` and `api_key.revoked`, including the key id, name, and scopes.
+- **R6.** Creating and revoking keys write audit events `api_key.created` and `api_key.revoked`. The metadata of both events includes the key id, name, and scopes.
 
 ## Acceptance criteria
 

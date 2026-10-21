@@ -1,8 +1,8 @@
 import pytest
 
 from orders import create_app
-from orders.http_client import ResilientClient
 from orders.repository import OrderRepository
+from orders.settings import DEFAULTS, build_payments_client
 
 
 class FakeResponse:
@@ -44,7 +44,13 @@ def fake_session():
 
 @pytest.fixture
 def payments(fake_session):
-    return ResilientClient("https://payfast.test", "test-key", session=fake_session, backoff_base=0)
+    settings = dict(
+        DEFAULTS,
+        PAYFAST_BASE_URL="https://payfast.test",
+        PAYFAST_API_KEY="test-key",
+        PAYFAST_BACKOFF=0,
+    )
+    return build_payments_client(settings, session=fake_session)
 
 
 @pytest.fixture

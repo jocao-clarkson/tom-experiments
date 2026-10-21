@@ -30,7 +30,7 @@ Integrators can fetch a single invoice but not list them, so reconciliation scri
 ## Non-functional constraints
 
 - p95 latency under 250 ms for tenants with up to 1M invoices.
-- Database schema changes, new indexes included, are frozen this quarter while the invoices table is repartitioned. The existing indexes are `(tenant_id, created_at DESC, id DESC)` and `(tenant_id, customer_id)`.
+- Database schema changes, new indexes included, are frozen this quarter while the invoices table is repartitioned.
 - Error responses must use the platform error envelope; SDKs parse it generically.
 - No new third-party dependencies without platform approval.
 

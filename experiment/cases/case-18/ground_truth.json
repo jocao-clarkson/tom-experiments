@@ -5,73 +5,90 @@
   "defects": [
     {
       "id": "D1",
-      "description": "The new key's plaintext secret is stored in a pending_secret TEXT column, violating the NFR that plaintext secrets are never written to the database unencrypted.",
-      "location": "plan.md steps 1, 2, 5; spec.md non-functional constraints",
-      "expected_lenses": ["lens-risk"],
-      "severity": "blocker"
-    },
-    {
-      "id": "D2",
-      "description": "The secret endpoint returns pending_secret on every call until the hourly job clears it, so the secret can be fetched repeatedly and for up to ~70 minutes. R7/AC4 require one retrieval only, within 10 minutes, then 404.",
+      "description": "The secret endpoint returns the pending secret on every call while pending_secret is non-null, and it is only cleared by the hourly expireDue sweep. The secret can therefore be fetched repeatedly and for up to ~70 minutes, while R7/AC4 require exactly one retrieval, only within 10 minutes of rotation, then 404.",
       "location": "plan.md steps 2, 8; spec.md R7, AC4",
       "expected_lenses": ["lens-consistency"],
       "severity": "major"
     },
     {
-      "id": "D3",
-      "description": "Plan adds a new src/lib/parseHours.ts helper instead of using the existing intParam in src/lib/validate.ts that routes already use for integer body params.",
-      "location": "plan.md step 3; fixture/src/lib/validate.ts; fixture/src/routes/keys.ts",
-      "expected_lenses": ["lens-architecture"],
-      "severity": "minor"
+      "id": "D2",
+      "description": "AC4 has no planned test: the route test only checks that the secret endpoint returns the decrypted pending secret. Nothing tests that a second call returns 404 or that a call after 10 minutes returns 404.",
+      "location": "plan.md test strategy; spec.md AC4",
+      "expected_lenses": ["lens-tests"],
+      "severity": "major"
     },
     {
-      "id": "D4",
-      "description": "grace_period_hours above 168 is capped, negatives become 0, and non-numeric values fall back to 24. Spec R3/AC2 require 400 (and no key created) for any value that is not an integer in 0-168.",
-      "location": "plan.md step 3; spec.md R3, AC2",
+      "id": "D3",
+      "description": "grace_period_hours is parsed with the existing intParam, which is lenient: it clamps out-of-range values into [0, 168] and returns the default 24 for non-numeric input (and truncates non-integers). R3/AC2 require 400 and no key created for any value that is not an integer in 0-168, e.g. 500.",
+      "location": "plan.md step 3; fixture/src/lib/validate.ts; spec.md R3, AC2",
       "expected_lenses": ["lens-consistency"],
       "severity": "major"
     },
     {
-      "id": "D5",
-      "description": "Inline authorization allows any org_admin without comparing key.orgId to actor.orgId, so admins of other orgs can rotate keys (violates R4/AC5). It also duplicates KeyService.assertCanManage, which already does the correct check.",
-      "location": "plan.md step 4; fixture/src/keys/keyService.ts; spec.md R4, AC5",
+      "id": "D4",
+      "description": "The rotate route's inline authorization allows any org_admin without comparing key.orgId to actor.orgId, so admins of other orgs can rotate keys (violates R4/AC5). It also duplicates KeyService.assertCanManage, which the DELETE route already uses and which does the org-scoped check. The planned tests cover only the non-owner member, not the other-org admin.",
+      "location": "plan.md step 4; fixture/src/keys/keyService.ts; fixture/src/routes/keys.ts; spec.md R4, AC5",
       "expected_lenses": ["lens-risk", "lens-architecture"],
       "severity": "blocker"
     },
     {
-      "id": "D6",
-      "description": "Rotate checks status then creates the replacement and marks rotating as separate non-transactional steps, so concurrent rotate requests can both pass the status check and create two replacement keys (violates the concurrency NFR and R5).",
-      "location": "plan.md step 5; spec.md R5, non-functional constraints",
-      "expected_lenses": ["lens-risk"],
+      "id": "D5",
+      "description": "The replacement is created through create(actor, key.name, ttlDays), and create() sets ownerId (and orgId) from the acting user. When an org admin rotates a member's key, the new key is owned by the admin, which violates R1 (replacement has the same name, org and owner).",
+      "location": "plan.md step 5; fixture/src/keys/keyService.ts create(); spec.md R1",
+      "expected_lenses": ["lens-consistency"],
       "severity": "major"
     },
     {
+      "id": "D6",
+      "description": "The secret endpoint does its own inline ownership check (actor.id === key.ownerId) instead of the service's assertCanManage, which every other key route (DELETE) uses for authorization.",
+      "location": "plan.md step 8; fixture/src/routes/keys.ts; fixture/src/keys/keyService.ts",
+      "expected_lenses": ["lens-architecture"],
+      "severity": "minor"
+    },
+    {
       "id": "D7",
-      "description": "verify accepts any key with status 'rotating' without checking grace_ends_at; the old key keeps working until the hourly expireDue run, up to an hour past graceEndsAt, violating R2/AC1 and the one-minute NFR. AC1 is only checked by observing staging.",
-      "location": "plan.md steps 6 and test strategy; fixture/src/server.ts; spec.md R2, AC1",
+      "description": "verify accepts any key with status 'rotating' without checking grace_ends_at, so the old key keeps working until the hourly expireDue sweep runs, up to an hour past graceEndsAt. This violates R2/AC1 and the NFR that an old key stops within one minute of graceEndsAt. AC1 is only checked by watching staging, with no automated test.",
+      "location": "plan.md step 6, test strategy; fixture/src/server.ts setInterval; spec.md R2, AC1, non-functional constraints",
       "expected_lenses": ["lens-risk", "lens-tests"],
+      "severity": "major"
+    },
+    {
+      "id": "D8",
+      "description": "KeyService gets the VerifyCache as a constructor dependency and calls cache.evict from rotate. In server.ts the VerifyCache is built from service.verify, so this creates a circular service<->cache dependency. Cache eviction is done at the route layer (the DELETE route calls cache.evict after setStatus).",
+      "location": "plan.md step 5; fixture/src/server.ts; fixture/src/keys/verifyCache.ts; fixture/src/routes/keys.ts",
+      "expected_lenses": ["lens-architecture"],
       "severity": "major"
     }
   ],
   "tensions": [
     {
       "id": "T1",
-      "lenses": ["lens-risk", "lens-consistency"],
+      "lenses": ["lens-consistency", "lens-tests"],
       "related_defects": ["D1", "D2"],
-      "description": "Risk's natural fix is to stop persisting the plaintext secret at all (drop pending_secret). That removes the only mechanism for R7's re-display. Consistency wants R7 implemented more strictly (once, within 10 minutes), which presupposes the secret is still retrievable server-side. The two fixes pull in opposite directions unless someone notices the NFR only forbids unencrypted storage and the fixture already has encrypt/decrypt.",
-      "lens_a_fix": "Remove the pending_secret column; never store the new secret anywhere after the response.",
-      "lens_b_fix": "Enforce R7 at read time: return the secret only once and only within 10 minutes of rotation.",
-      "reconciliation": "Store the new secret encrypted with lib/crypto encrypt() plus an expires_at of rotation + 10 minutes; on GET, atomically read-and-delete it (UPDATE ... SET pending_secret = NULL ... RETURNING) only when unexpired and the caller is the rotating actor, and clear expired values. This satisfies both the NFR and R7/AC4.",
-      "subtle": false
+      "description": "Consistency's natural fix enforces R7 in the data layer: an atomic read-and-clear in getPendingSecret whose SQL also holds the 10-minute cutoff (pending_secret_set_at > now() - interval '10 minutes'). Tests' natural fix adds AC4 unit tests: a second call returns 404, and with jest fake timers advanced 10 minutes a call returns 404. The existing test suite has no database. test/keyService.test.ts stubs KeyRepo with object literals, the route test stubs the service, and package.json has no Postgres test setup. So with the cutoff and the once-only rule living in SQL, the fake-timer tests only exercise the stub and pass whatever the real query does.",
+      "lens_a_fix": "Make getPendingSecret an atomic UPDATE ... SET pending_secret = NULL WHERE id = $1 AND pending_secret IS NOT NULL AND pending_secret_set_at > now() - interval '10 minutes' RETURNING pending_secret; return 404 when no row.",
+      "lens_b_fix": "Add tests for AC4: second retrieval returns 404, and retrieval after advancing fake timers past 10 minutes returns 404.",
+      "reconciliation": "Keep the atomic read-and-clear for once-only (from consistency: R7's once and 10-minute rules, and that the read must clear the value). Compute the cutoff in KeyService from the app clock and pass it as a parameter (getPendingSecret(id, notBefore)), or return set_at and compare it in the service. Then unit tests with jest.setSystemTime and a recording stub repo can assert the 10-minute boundary and the second-call 404 (from tests: the suite has no database and every test stubs the repo). Note that the SQL atomicity itself needs a DB-backed test, which CI does not run.",
+      "subtle": true
     },
     {
       "id": "T2",
-      "lenses": ["lens-architecture", "lens-consistency"],
-      "related_defects": ["D3", "D4"],
-      "description": "Architecture's natural fix is to drop parseHours and reuse validate.intParam. But intParam is lenient by design: it clamps out-of-range values into [min, max] and returns the default for non-numeric input, exactly the behaviour consistency flags as contradicting R3 (400 on invalid). Reusing it as-is keeps the spec violation. Visible only in validate.ts.",
-      "lens_a_fix": "Replace parseHours with intParam(raw, { min: 0, max: 168, default: 24 }).",
-      "lens_b_fix": "Reject non-integer, negative, or >168 values with 400 before creating any key.",
-      "reconciliation": "Add a strict variant to validate.ts (e.g. intParam with a strict flag, or a strictIntParam that throws a 400 error) without changing intParam's lenient default for existing callers, and use it for grace_period_hours; test AC2.",
+      "lenses": ["lens-consistency", "lens-architecture"],
+      "related_defects": ["D5", "D6"],
+      "description": "Consistency's natural fix for R1 creates the replacement with the old key's ownerId and orgId instead of the acting user's. Architecture's natural fix replaces step 8's inline owner check with assertCanManage, like the other key routes. Today step 8's owner check only matches R7 ('the user who rotated it') by accident, because create(actor, ...) makes the rotater the owner. Once the owner is preserved, neither check identifies the rotater. The inline check gives the secret to the old owner and not to the admin who rotated. assertCanManage gives it to the owner and to every admin in the org.",
+      "lens_a_fix": "Create the replacement with the old key's ownerId and orgId (add an owner parameter to create or a dedicated insert) so R1 holds when an admin rotates.",
+      "lens_b_fix": "Authorize GET /keys/:id/secret with service.assertCanManage(actor, key), as DELETE does, instead of the inline ownerId comparison.",
+      "reconciliation": "Preserve the old owner and org on the replacement, and store the rotating actor's id (e.g. pending_secret_rotated_by) alongside the encrypted pending secret. The secret endpoint should then require actor.id === rotated_by, optionally after assertCanManage for org scoping. This needs consistency's fact (R1 same owner versus create() taking ownership from the actor, and R7 naming the rotater) and architecture's fact (what assertCanManage allows: the owner or any same-org admin).",
+      "subtle": true
+    },
+    {
+      "id": "T3",
+      "lenses": ["lens-risk", "lens-architecture"],
+      "related_defects": ["D7", "D8"],
+      "description": "Risk's natural fix for the one-minute cutoff is to accept rotating keys in KeyService.verify only while graceEndsAt > now (or to run the sweep every minute). Architecture's natural fix for the circular dependency is to remove the cache from KeyService and evict at the route layer after rotate, as DELETE does. Followed together, they still break the NFR. The gateway's /internal/verify goes through VerifyCache (server.ts), which serves a cached positive result for its default 5-minute TTL (verifyCache.ts) without calling verify again. Eviction only happens on explicit status changes, and graceEndsAt passing is not one. So the old key keeps authenticating for up to 5 minutes after graceEndsAt.",
+      "lens_a_fix": "In KeyService.verify accept status 'rotating' only when graceEndsAt > Date.now(); keep the hourly sweep for status bookkeeping.",
+      "lens_b_fix": "Drop the VerifyCache dependency from KeyService; call cache.evict(oldKey.id) in the rotate route after service.rotate returns, matching the DELETE route.",
+      "reconciliation": "Check graceEndsAt in verify (risk: the one-minute-after-graceEndsAt NFR, with graceEndsAt as the cutoff). Also make VerifyCache cap each entry's lifetime at min(now + ttlMs, key.graceEndsAt, key.expiresAt), so a cached positive result cannot outlive the key's cutoff. This needs architecture's fact that /internal/verify serves cached results for 5 minutes without re-running verify, and that eviction is tied to explicit status changes only. Do the eviction in the route, not via a service-to-cache dependency. The global TTL and sweep interval stay unchanged.",
       "subtle": true
     }
   ]

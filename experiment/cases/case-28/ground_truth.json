@@ -5,101 +5,90 @@
   "defects": [
     {
       "id": "D1",
-      "description": "Audit metadata includes 'the rotate response payload', which contains the new key's plaintext. That violates R6/AC6 (secrets never in audit events), and the plan has no test for AC6.",
-      "location": "plan.md step 8",
-      "expected_lenses": [
-        "lens-risk"
-      ],
+      "description": "Step 8 puts 'the rotate response payload' into the audit event metadata. That payload contains the new key's plaintext, so the secret is persisted in audit_events, violating R6 (secrets never in audit events or logs) and AC6.",
+      "location": "plan.md step 8; spec.md R2, R6",
+      "expected_lenses": ["lens-risk"],
       "severity": "blocker"
     },
     {
       "id": "D2",
-      "description": "The request uses grace_hours (default 24, max 168) instead of the spec's grace_seconds (default 86400, max 604800). That is a parameter name and unit drift, so AC1 (3600 seconds) and AC4 (604801) can't be expressed. The tests use grace_hours: 169 accordingly.",
-      "location": "plan.md step 1; plan.md Test strategy",
-      "expected_lenses": [
-        "lens-consistency"
-      ],
+      "description": "The rotate body uses grace_hours (default 24, max 168) instead of the spec's grace_seconds (default 86400, allowed 0 to 604800). Name and unit drift: AC1 (3600 seconds) and AC4 (604801 returns 400) cannot be expressed, and the planned test uses grace_hours: 169 instead.",
+      "location": "plan.md step 1; plan.md Test strategy; spec.md R1, AC1, AC4",
+      "expected_lenses": ["lens-consistency"],
       "severity": "major"
     },
     {
       "id": "D3",
-      "description": "New keys are generated ad hoc (32-byte hex, bcrypt hash, prefix taken from the secret) instead of with apikey.Generate. Verifier.Verify expects the lk_<prefix>_<secret> format and a sha256 hash, so rotated keys never authenticate. This violates the NFR 'existing key format and hashing', and putting the prefix inside the secret also leaks secret bytes.",
+      "description": "New key material is generated ad hoc (32-byte hex secret, bcrypt cost 10, prefix taken from the first 8 chars of the secret) instead of with apikey.Generate. Verifier.Verify expects the lk_<prefix>_<secret> format and a sha256 hash, so rotated keys never authenticate; this breaks the NFR 'existing key format and hashing', and a prefix cut from the secret leaks secret bytes.",
       "location": "plan.md step 3; fixture/internal/apikey/apikey.go",
-      "expected_lenses": [
-        "lens-architecture",
-        "lens-risk"
-      ],
+      "expected_lenses": ["lens-architecture", "lens-risk"],
       "severity": "blocker"
     },
     {
       "id": "D4",
-      "description": "Revocation only evicts the key from the cache of the instance that handled the request. The other 11 instances keep accepting the key from their verifier cache for up to the 10-minute default TTL, which violates R4/AC2 (within 5 seconds on all instances). Grace-period expiry lags the same way. The AC2 test only checks the same instance.",
-      "location": "plan.md steps 6-7; plan.md Test strategy; fixture/internal/apikey/apikey.go, cache.go",
-      "expected_lenses": [
-        "lens-risk"
-      ],
+      "description": "Revoke only evicts the key from the verifier cache of the instance that served the revoke. The other API instances (12 per the spec) keep returning the cached key until the cache entry expires, and cmd/server/main.go builds the verifier with KEY_CACHE_TTL defaulting to 10 minutes, so R4/AC2 (rejected on every instance within 5 s) fails. Grace-expired old keys lag the same way because cache hits are returned without re-checking Active. The AC2 test only checks the same verifier.",
+      "location": "plan.md steps 6-7; plan.md Test strategy; fixture/cmd/server/main.go; fixture/internal/apikey/apikey.go",
+      "expected_lenses": ["lens-risk"],
       "severity": "blocker"
     },
     {
       "id": "D5",
-      "description": "The plan exports the verifier's internal cache (Verifier.Cache) and has the HTTP handler reach into it, which breaks the apikey package's encapsulation and couples request handlers to the auth hot-path internals.",
-      "location": "plan.md step 7",
-      "expected_lenses": [
-        "lens-architecture"
-      ],
+      "description": "Step 7 exports the verifier's internal cache as Verifier.Cache with a Delete(hash) method and gives KeysAPI a *apikey.Verifier field so the HTTP handler reaches into auth hot-path internals, breaking the apikey package's encapsulation (Verifier's cache is deliberately unexported).",
+      "location": "plan.md step 7; fixture/internal/apikey/apikey.go",
+      "expected_lenses": ["lens-architecture"],
       "severity": "minor"
     },
     {
       "id": "D6",
-      "description": "Audit events are written with a raw INSERT from the handler via a type assertion on Store, bypassing the audit package. The insert also happens after commit rather than in the transaction, as Create does with audit.RecordTx.",
-      "location": "plan.md step 8; fixture/internal/audit/audit.go; fixture/internal/httpapi/keys.go",
-      "expected_lenses": [
-        "lens-architecture"
-      ],
+      "description": "Audit events are written with a hand-written INSERT into audit_events via a type assertion a.Store.(store.Execer), bypassing the audit package and the KeysAPI.Audit writer that Create already uses (audit.Event / audit.Writer), duplicating insertSQL in the handler layer.",
+      "location": "plan.md step 8; fixture/internal/httpapi/keys.go; fixture/internal/audit/audit.go",
+      "expected_lenses": ["lens-architecture"],
       "severity": "major"
     },
     {
       "id": "D7",
-      "description": "Audit failures are logged and ignored, and the operation still succeeds. That contradicts R5/AC3 (if the audit write fails the operation fails and nothing changes), and AC3 has no test.",
-      "location": "plan.md step 8; spec.md R5, AC3",
-      "expected_lenses": [
-        "lens-consistency",
-        "lens-tests"
-      ],
+      "description": "Audit insert failures are logged and the request still succeeds, and the audit write happens after the change commits. This contradicts R5/AC3: if the audit write fails the operation must fail (500) and nothing changes (no new key, no expiry).",
+      "location": "plan.md steps 8-9; spec.md R5, AC3",
+      "expected_lenses": ["lens-consistency"],
+      "severity": "major"
+    },
+    {
+      "id": "D8",
+      "description": "The test strategy has no test for AC3 (audit insert fails, rotate returns 500 and no new key exists) or AC6 (no audit event contains the plaintext), and the AC1 test does not first assert both keys authenticate or use the 3600/3601 s boundary.",
+      "location": "plan.md Test strategy; spec.md AC1, AC3, AC6",
+      "expected_lenses": ["lens-tests"],
       "severity": "major"
     }
   ],
   "tensions": [
     {
       "id": "T1",
-      "lenses": [
-        "lens-risk",
-        "lens-architecture"
-      ],
-      "related_defects": [
-        "D4",
-        "D5"
-      ],
-      "description": "Risk sees that local cache eviction can't meet 'all instances within 5s' and naturally recommends removing the verification cache or checking revoked_at in the database on every request. Architecture objects to exporting the cache and wants an encapsulated Verifier.Invalidate method instead, which keeps the cache but is still local-only. Risk's fix breaks the NFR (no per-request DB round trip, p99 under 2 ms, about 20k rps), while architecture's fix leaves revocation broken. You only see the conflict after reading the fixture's 10-minute cache TTL.",
-      "lens_a_fix": "Remove the verifier cache (or bypass it) so every request checks revocation and expiry in the database.",
-      "lens_b_fix": "Keep the cache unexported; add an Invalidate method on Verifier instead of exposing Verifier.Cache to handlers.",
-      "reconciliation": "Neither export the cache nor remove it. Construct the Verifier with cacheTTL at most 5s (NewVerifier already takes it as a parameter). Each instance then re-reads a key at most once every 5 seconds, which meets R4 and AC1 timing across all 12 instances with no pub/sub and no per-request DB call. Drop step 7, and test AC2 with two Verifier instances and clock.Fixed.",
+      "lenses": ["lens-risk", "lens-architecture"],
+      "related_defects": ["D4", "D5"],
+      "description": "Risk sees that local eviction cannot reach the other instances, whose verifiers keep keys for the 10-minute KEY_CACHE_TTL set in cmd/server/main.go, and naturally recommends re-checking revocation/expiry in the database on every request (or bypassing the cache). Architecture objects to exporting the cache and recommends an encapsulated Verifier.Invalidate/Forget method, which keeps the cache but is still local-only. Risk's fix breaks the NFR (no per-request DB round trip, p99 under 2 ms at about 20k rps); architecture's fix leaves revocation broken on 11 of 12 instances. The staleness bound lives in main.go's env default, not in apikey.go, the module architecture is reasoning about.",
+      "lens_a_fix": "Bypass or remove the verifier cache so every request checks revoked_at/expires_at in the database.",
+      "lens_b_fix": "Keep the cache unexported; replace step 7 with an encapsulated Verifier.Invalidate method called by Revoke.",
+      "reconciliation": "Keep the cache and keep it encapsulated (drop step 7; at most a Verifier.Invalidate for same-instance immediacy), and bound staleness on every instance by setting KEY_CACHE_TTL to 5s or less where cmd/server/main.go builds the verifier (risk-side fact: the TTL is that env default, not fixed in apikey). With NewVerifier's TTL argument (architecture-side fact: the cache is the mechanism that keeps verification off the database) each instance re-reads a key at most once per 5 s, meeting R4 for revoked and grace-expired keys with no pub/sub and no per-request DB call. Test AC2 with two Verifiers sharing one store and clock.Fixed advanced 5 s.",
       "subtle": true
     },
     {
       "id": "T2",
-      "lenses": [
-        "lens-architecture",
-        "lens-consistency"
-      ],
-      "related_defects": [
-        "D6",
-        "D7"
-      ],
-      "description": "Architecture wants the raw INSERT replaced with the audit package, and the obvious entry point is Recorder.Record. Consistency wants an audit failure to abort the operation. Record is asynchronous and fire-and-forget (it drops events when the buffer is full), so following architecture's natural fix makes the R5 guarantee impossible. You only see this after reading audit.go.",
-      "lens_a_fix": "Use the audit package (Recorder.Record) instead of a hand-written INSERT.",
-      "lens_b_fix": "Make an audit write failure fail the rotate/revoke request and roll back the change.",
-      "reconciliation": "Call audit.RecordTx(ctx, ex, ev) inside the same Store.WithTx as the key changes, as KeysAPI.Create already does. A failed audit write then rolls back the new key and the expiry (AC3). Keep plaintext out of the metadata, and add a test that injects an audit Exec error and asserts a 500 and no new key.",
+      "lenses": ["lens-architecture", "lens-consistency"],
+      "related_defects": ["D6", "D7"],
+      "description": "Architecture wants the raw INSERT replaced by the audit writer KeysAPI already has, a.Audit.Write, exactly as Create uses it. Consistency wants an audit failure to fail the request and leave nothing changed. In production a.Audit is wired in cmd/server/main.go as audit.NewQueue(audit.NewSQL(st), 4096), whose Write enqueues and always returns nil, outside any transaction. Following architecture's fix makes consistency's R5/AC3 guarantee impossible: failures are never seen and the key change commits regardless. The hazard is in the caller's wiring, not in audit.go.",
+      "lens_a_fix": "Write audit events through KeysAPI.Audit (audit.Writer) as Create does, instead of a hand-written INSERT.",
+      "lens_b_fix": "Make an audit write failure return 500 and roll back the rotate/revoke change.",
+      "reconciliation": "Use the audit package but not the injected queued writer: inside the same Store.WithTx as CreateKey/SetExpiry (or Revoke), call audit.NewSQL(ex).Write(ctx, ev) with the transaction's Execer and return its error, so a failed insert rolls back the new key and the expiry (AC3). Needs the architecture-side fact that audit.SQL accepts any Execer and WithTx exposes one, and the consistency-side fact that R5 requires synchronous, atomic failure, which rules out a.Audit (the Queue wired in main.go). Leave a.Audit for best-effort events such as key.created, keep plaintext out of metadata.",
+      "subtle": true
+    },
+    {
+      "id": "T3",
+      "lenses": ["lens-tests", "lens-consistency"],
+      "related_defects": ["D8", "D7"],
+      "description": "Tests wants an AC3 test in keys_test.go with the existing fakeStore the plan reuses: make the audit Exec fail, assert 500 and that no new key exists. Consistency wants the audit write moved into the rotate transaction so its failure rolls back CreateKey and SetExpiry. The fakeStore's WithTx just calls fn(f, f) and CreateKey writes straight into the map, so there is no rollback: against the consistency-correct implementation (CreateKey, SetExpiry, then audit in the tx) the tests lens's AC3 test fails, and making it pass would push the handler to audit before writing or to skip work, distorting the implementation. The rollback the requirement depends on exists only in store.PG.WithTx (pgx.BeginFunc).",
+      "lens_a_fix": "Add a keys_test.go case that injects an audit Exec error into fakeStore and asserts a 500 and an unchanged key set.",
+      "lens_b_fix": "Do the audit insert inside Store.WithTx after CreateKey/SetExpiry and return its error so the transaction rolls back.",
+      "reconciliation": "Keep the in-transaction ordering and make the test double honour transactions: give fakeStore an execErr knob and a WithTx that runs fn against a staged copy of the key map and commits it only when fn returns nil, mirroring PG.WithTx's BeginFunc commit/rollback. Then the AC3 test asserts 500, no new key, and the old key without expires_at. Needs the tests-side fact (fakeStore.WithTx has no rollback) and the consistency-side fact (R5's 'nothing changes' is delivered by transaction rollback, not by ordering).",
       "subtle": true
     }
   ]

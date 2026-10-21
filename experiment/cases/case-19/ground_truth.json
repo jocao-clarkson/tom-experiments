@@ -5,66 +5,90 @@
   "defects": [
     {
       "id": "D1",
-      "description": "Plan writes a new collect-local Scrub with only two regexes (emails, Bearer tokens) instead of using internal/redact, which R2 requires. It misses the password/secret, AWS key and IP patterns, so AC1 (password=hunter2 masked) fails and secrets leak into bundles.",
+      "description": "Plan writes a new collect-local Scrub with only two regexes (emails, Bearer tokens) instead of using the shared internal/redact rules that R2 requires (redact.Line / redact.Copy). It misses the password/secret, AWS key and IP patterns, so AC1 (password=hunter2 masked) fails and secrets leak into bundles.",
       "location": "plan.md step 3; fixture/internal/redact/redact.go; spec.md R2, AC1",
       "expected_lenses": ["lens-architecture", "lens-risk"],
       "severity": "blocker"
     },
     {
       "id": "D2",
-      "description": "Each file is loaded whole with os.ReadFile and kept in memory as scrubbed bytes until bundling. With multi-GB system logs this violates the bounded-memory NFR.",
-      "location": "plan.md steps 4 and 6; spec.md non-functional constraints",
+      "description": "Step 5 loads each kept file whole with os.ReadFile and holds the scrubbed bytes in memory until step 6 bundles them. With multi-GB system logs this violates the bounded-memory non-functional constraint; files should be streamed.",
+      "location": "plan.md steps 5 and 6; spec.md non-functional constraints",
       "expected_lenses": ["lens-risk"],
       "severity": "major"
     },
     {
       "id": "D3",
-      "description": "--include-system path selection (AC4, Linux vs macOS, missing/unreadable file) has no unit-level test; the only coverage is a host-dependent e2e test.",
-      "location": "plan.md test strategy; spec.md AC4",
-      "expected_lenses": ["lens-tests"],
+      "description": "The size cap (step 4) is computed from on-disk os.Stat sizes before any file is read, but R3 defines the cap on the redacted total. Redaction changes sizes, so the plan can keep a set whose redacted bundle exceeds max_bundle_mb or drop files that would have fit.",
+      "location": "plan.md steps 2 and 4; spec.md R3, AC2",
+      "expected_lenses": ["lens-consistency"],
       "severity": "major"
     },
     {
       "id": "D4",
-      "description": "The e2e test reads the CI runner's real system log, contradicting the NFR that tests must not depend on host log files and must run unprivileged on Linux, macOS and Windows (no such file on Windows; often unreadable on Linux).",
-      "location": "plan.md test strategy; spec.md non-functional constraints",
-      "expected_lenses": ["lens-consistency"],
+      "description": "Step 8 builds its own upload with transport.New(...).Upload and a separate 30-minute context and error/exit mapping, instead of going through the existing uploadBundle helper in internal/cli/upload.go, which R4 requires (\"through the existing upload path\"). Duplicates the upload path.",
+      "location": "plan.md step 8; fixture/internal/cli/upload.go; spec.md R4",
+      "expected_lenses": ["lens-architecture"],
       "severity": "major"
     },
     {
       "id": "D5",
-      "description": "Skipped/unreadable files make the command exit 1, but R5/AC3 and the existing ExitPartial constant require exit 3.",
-      "location": "plan.md step 9; fixture/internal/cli/root.go; spec.md R5, AC3",
-      "expected_lenses": ["lens-consistency"],
+      "description": "The summary (step 9) has no ticket ID or uploaded-bytes fields; the plan only prints an 'uploaded ...' line to stderr. R4, R6 and AC5 require the upload details in the summary, including the single JSON object under --output json.",
+      "location": "plan.md steps 8 and 9; spec.md R4, R6, AC5",
+      "expected_lenses": ["lens-spec-coverage"],
       "severity": "major"
     },
     {
       "id": "D6",
-      "description": "Plan adds a per-command --json flag instead of using the global --output flag and env.Out Printer, contradicting R6 and the existing CLI convention.",
-      "location": "plan.md steps 1 and 9; fixture/internal/cli/root.go; spec.md R6",
-      "expected_lenses": ["lens-architecture", "lens-consistency"],
+      "description": "Skipped/unreadable files make the command exit 1, but R5/AC3 and the existing ExitPartial constant in root.go require exit 3.",
+      "location": "plan.md step 10; fixture/internal/cli/root.go; spec.md R5, AC3",
+      "expected_lenses": ["lens-consistency"],
+      "severity": "major"
+    },
+    {
+      "id": "D7",
+      "description": "AC4 (--include-system) is covered only by an e2e test that reads the CI runner's real system log. That contradicts the CI constraint (unprivileged Linux/macOS/Windows runners; tests must not depend on host log files) and leaves path selection, missing file and unreadable file untested at unit level.",
+      "location": "plan.md test strategy; spec.md AC4, non-functional constraints",
+      "expected_lenses": ["lens-tests"],
+      "severity": "major"
+    },
+    {
+      "id": "D8",
+      "description": "Step 2 hard-codes /var/log/syslog and /var/log/system.log by runtime.GOOS inside internal/collect, duplicating the platform system-log path that config.Load already resolves into cfg.SystemLog (config key system_log, also used by the doctor command). The plan should use cfg.SystemLog.",
+      "location": "plan.md step 2; fixture/internal/config/config.go; fixture/internal/cli/doctor.go",
+      "expected_lenses": ["lens-architecture"],
       "severity": "minor"
     }
   ],
   "tensions": [
     {
       "id": "T1",
-      "lenses": ["lens-architecture", "lens-risk"],
-      "related_defects": ["D1", "D2"],
-      "description": "Architecture's natural fix is to replace the local Scrub with the shared redact package, and the obvious entry point for whole files is redact.Lines. But redact.Lines accumulates every scrubbed line in a []string, so it holds the entire file in memory, which is exactly what risk flags. Also bundle.Writer.AddFile needs the final size up front, which pushes toward buffering redacted content. Both natural fixes collide on how the file is read; visible only in redact.go and bundle.go.",
-      "lens_a_fix": "Delete collect/scrub.go and redact each file with redact.Lines.",
-      "lens_b_fix": "Stream files line by line instead of loading them into memory.",
-      "reconciliation": "Reuse the shared rules via redact.Line (or a new streaming redact.Stream(r, w) in the redact package that Lines delegates to), streaming each file into a temp file in the output directory; take the redacted size from the temp file for the cap and for AddFile, then stream it into the bundle and delete it. Memory stays bounded and the redaction rules stay in one place.",
+      "lenses": ["lens-risk", "lens-consistency"],
+      "related_defects": ["D2", "D3"],
+      "description": "Risk's fix is to stream each file through redaction (e.g. redact.Copy) straight into the bundle instead of holding it in memory. Consistency's fix is to apply the cap to redacted sizes, which with the plan's structure means scrubbing every candidate first and summing the scrubbed byte lengths, i.e. keeping the content buffered. Streaming straight into the bundle means the redacted sizes are unknown when the cap must be decided. Also bundle.Writer.AddFile (fixture/internal/bundle/bundle.go) writes the tar header with the exact size before any content, so redacted output can't be streamed in without knowing its length. Measuring the stat size doesn't work because redaction changes it.",
+      "lens_a_fix": "Replace os.ReadFile with streaming: open each kept file and pipe it through line-by-line redaction directly into bundle.Writer.AddFile.",
+      "lens_b_fix": "Move the cap after scrubbing and sum the scrubbed (redacted) lengths, as R3 specifies, dropping the oldest files until the redacted total fits.",
+      "reconciliation": "Uses risk's bounded-memory constraint, consistency's R3 rule (cap on redacted total) and the AddFile size-up-front contract. Stream each candidate once through redact.Copy into a 0600 temp file in the output directory (only redacted bytes touch disk, so R2 holds). Take each temp file's size as its redacted size, apply the cap oldest-first on those sizes, then stream the kept temp files into AddFile with that exact size, and delete all temp files on success or error. A two-pass alternative (count pass into a counting writer, then re-redact into AddFile) only works if the file is snapshotted, because live logs grow between passes. Dry run (R7: writes nothing) then needs a count-only pass.",
       "subtle": true
     },
     {
       "id": "T2",
-      "lenses": ["lens-tests", "lens-consistency"],
-      "related_defects": ["D3", "D4"],
-      "description": "Tests wants AC4 actually verified, and the plan's only coverage is the e2e test, so the natural fix is to keep and harden it (e.g. assert inclusion on each OS). Consistency wants that e2e removed because CI forbids depending on host log files and runs on Windows and unprivileged runners. Both cannot be followed.",
-      "lens_a_fix": "Keep the e2e --include-system test and make its assertions stronger across OSes.",
-      "lens_b_fix": "Remove the e2e test that reads the runner's real system log.",
-      "reconciliation": "Make the system log locations injectable (a package-level map keyed by GOOS, or a parameter to Discover) and unit test path selection, presence/absence and unreadable-file handling with temp files; drop the host-dependent e2e from CI.",
+      "lenses": ["lens-architecture", "lens-spec-coverage"],
+      "related_defects": ["D4", "D5"],
+      "description": "Architecture's fix is to replace step 8's hand-rolled transport call with the existing uploadBundle(env, path, ticket). Spec-coverage's fix is to add ticket_id and uploaded bytes to collect's summary object so --output json yields one object with upload details (AC5). Together they break: uploadBundle (fixture/internal/cli/upload.go) prints its own env.Out.Result on success, and the json Printer in root.go encodes one document per Result call, so collect --upload --output json emits two JSON objects. uploadBundle also returns only an exit code, not the byte count the summary needs, and returns ExitOK even when collect has skipped files.",
+      "lens_a_fix": "Delete the custom transport code in step 8 and call uploadBundle(env, bundlePath, ticket) from upload.go.",
+      "lens_b_fix": "Add ticket_id and uploaded_bytes fields to collectResult and render them in the single env.Out.Result summary.",
+      "reconciliation": "Uses uploadBundle's printing and return shape (architecture's side, upload.go/root.go) and AC5's single-object requirement (spec-coverage's side). Split upload.go into a non-printing core, e.g. sendBundle(env, path, ticket) (bytes int64, err error), that keeps the existing transport/timeout path. runUpload keeps printing its own result. collect calls sendBundle, folds ticket and bytes into its one summary Result, and maps the error to exit 4, with partial (3) still reported when files were skipped.",
+      "subtle": true
+    },
+    {
+      "id": "T3",
+      "lenses": ["lens-tests", "lens-architecture"],
+      "related_defects": ["D7", "D8"],
+      "description": "Tests' fix is to drop the host-dependent e2e and unit-test the system-log handling by adding a test seam inside internal/collect (a package-level path map or override) that the test points at a temp file. Architecture's fix is to remove the hard-coded GOOS paths from internal/collect entirely and use cfg.SystemLog, which config.Load resolves per platform. As written, architecture's fix deletes the paths tests' seam overrides, and tests' seam adds a second source of truth for the system-log location.",
+      "lens_a_fix": "Remove test/e2e/collect_system_test.go; make the system-log paths in discover.go overridable (package var) and unit-test included/missing/unreadable cases with temp files.",
+      "lens_b_fix": "Drop the runtime.GOOS switch from step 2 and pass cfg.SystemLog (config key system_log) into Discover.",
+      "reconciliation": "Uses the existing system_log config key (architecture's side, config.go) and the CI constraints (tests' side, spec non-functional constraints). Discover takes the system-log path as a parameter supplied from cfg.SystemLog, with no new seam. collect_test writes system_log into its temp config pointing at a temp file (present, absent, and unreadable variants) and asserts inclusion/skip and exit code, which runs on all three CI OSes unprivileged. The e2e test is removed from CI.",
       "subtle": false
     }
   ]

@@ -1,3 +1,5 @@
+import { formatJson } from "./format.js";
+
 export interface OutputOptions {
   json: boolean;
   isTTY: boolean;
@@ -5,10 +7,7 @@ export interface OutputOptions {
   stderr?: NodeJS.WritableStream;
 }
 
-/**
- * All command output goes through Output. In --json mode, human progress
- * lines are suppressed and stdout carries only the result document.
- */
+/** Command output: progress lines, warnings, and the final result. */
 export class Output {
   private readonly stdout: NodeJS.WritableStream;
   private readonly stderr: NodeJS.WritableStream;
@@ -26,12 +25,16 @@ export class Output {
     this.line(this.opts.isTTY ? `\x1b[32m${msg}\x1b[0m` : msg);
   }
 
+  fail(msg: string): void {
+    this.line(this.opts.isTTY ? `\x1b[31m${msg}\x1b[0m` : msg);
+  }
+
   warn(msg: string): void {
     this.stderr.write((this.opts.isTTY ? `\x1b[33m${msg}\x1b[0m` : msg) + "\n");
   }
 
   result(data: Record<string, unknown>, summary: string): void {
-    if (this.opts.json) this.stdout.write(JSON.stringify(data, null, 2) + "\n");
+    if (this.opts.json) this.stdout.write(formatJson(data) + "\n");
     else this.stdout.write(summary + "\n");
   }
 }

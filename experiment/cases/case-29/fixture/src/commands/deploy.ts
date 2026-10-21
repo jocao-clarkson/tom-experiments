@@ -1,5 +1,5 @@
 import type { ApiClient } from "../api/client.js";
-import { CliError, UsageError } from "../errors.js";
+import { AbortError, CliError, UsageError } from "../errors.js";
 import type { Output } from "../ui/output.js";
 import { confirm } from "../ui/prompt.js";
 
@@ -21,7 +21,8 @@ const WAIT_LIMIT_MS = 15 * 60_000;
 
 export async function deploy(api: ApiClient, out: Output, args: DeployArgs, sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))): Promise<number> {
   if (!args.release) throw new UsageError("--release is required");
-  await confirm(`Deploy ${args.release} to ${args.service}?`, { yes: args.yes, isTTY: args.isTTY });
+  const confirmed = await confirm(`Deploy ${args.release} to ${args.service}?`, { yes: args.yes, isTTY: args.isTTY });
+  if (!confirmed) throw new AbortError();
 
   const created = await api.request<Deploy>("POST", `/services/${encodeURIComponent(args.service)}/deploys`, {
     release: args.release,

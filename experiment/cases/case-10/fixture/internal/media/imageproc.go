@@ -14,9 +14,8 @@ import (
 	"golang.org/x/image/draw"
 )
 
-// MaxPixels bounds decoded image size. Product photos from the catalog
-// pipeline can be large (medium-format scans), hence the generous limit.
-const MaxPixels = 100_000_000
+// MaxPixels bounds the pixel count Decode accepts.
+var MaxPixels int64
 
 var (
 	ErrUnsupportedType = errors.New("unsupported image type")

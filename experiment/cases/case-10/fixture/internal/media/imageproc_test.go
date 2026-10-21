@@ -6,8 +6,14 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"os"
 	"testing"
 )
+
+func TestMain(m *testing.M) {
+	MaxPixels = 4096 * 4096
+	os.Exit(m.Run())
+}
 
 func pngOf(t *testing.T, w, h int) []byte {
 	t.Helper()
@@ -30,6 +36,16 @@ func TestDecodeSniffsType(t *testing.T) {
 func TestDecodeRejectsNonImage(t *testing.T) {
 	_, _, err := Decode(bytes.NewReader([]byte("<html>not an image</html>")))
 	if !errors.Is(err, ErrUnsupportedType) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestDecodeRejectsOversize(t *testing.T) {
+	prev := MaxPixels
+	MaxPixels = 100
+	defer func() { MaxPixels = prev }()
+	_, _, err := Decode(bytes.NewReader(pngOf(t, 20, 20)))
+	if !errors.Is(err, ErrTooLarge) {
 		t.Fatalf("err = %v", err)
 	}
 }

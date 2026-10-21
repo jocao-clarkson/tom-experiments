@@ -5,102 +5,83 @@
   "defects": [
     {
       "id": "D1",
-      "description": "Plan hand-rolls unsigned base64 JSON cursors in the invoices route instead of reusing the signed encodeCursor/decodeCursor in src/lib/pagination.ts. The cursors carry no tenant or filter binding, so they can be forged, and R3/R5/AC2/AC3 (a cursor is only valid for its own tenant and filters) cannot be enforced. This contradicts the NFR that cursors be unforgeable and consistent with /v1/customers.",
+      "description": "Step 3 hand-rolls encodeInvoiceCursor/decodeInvoiceCursor as unsigned base64url JSON in the invoices route instead of reusing the HMAC-signed encodeCursor/decodeCursor (with deps.cursorSecret) in src/lib/pagination.ts that /v1/customers uses. Anyone can edit the payload (c, i, t), so cursors are forgeable, contradicting the NFR that cursors be opaque and unforgeable and consistent with /v1/customers.",
       "location": "plan.md step 3; fixture/src/lib/pagination.ts; fixture/src/routes/customers.ts",
-      "expected_lenses": [
-        "lens-architecture",
-        "lens-risk"
-      ],
+      "expected_lenses": ["lens-architecture", "lens-risk"],
       "severity": "major"
     },
     {
       "id": "D2",
-      "description": "Keyset uses created_at only (created_at < $after, ORDER BY created_at DESC) with no id tie-break, so invoices sharing a timestamp are skipped at page boundaries. That violates R2 and AC1 (60 rows with one created_at).",
-      "location": "plan.md steps 2-3",
-      "expected_lenses": [
-        "lens-consistency",
-        "lens-risk"
-      ],
-      "severity": "blocker"
+      "description": "Step 4 serves an undecodable cursor, or one whose tenant differs from req.tenantId, as a first-page request instead of returning 400 invalid_cursor, and the cursor payload carries no filters, so a cursor reused with different status/created_after cannot be detected. Contradicts R3, R5 and AC2, AC3, AC4.",
+      "location": "plan.md steps 3-4, 7; spec.md R3, R5, AC2-AC4",
+      "expected_lenses": ["lens-consistency"],
+      "severity": "major"
     },
     {
       "id": "D3",
-      "description": "A malformed cursor silently returns the first page, contradicting R5/AC4 (400 invalid_cursor). The plan's test even asserts the wrong behaviour.",
-      "location": "plan.md step 4; plan.md Test strategy",
-      "expected_lenses": [
-        "lens-consistency"
-      ],
+      "description": "Step 8 adds a new CI workflow (.github/workflows/invoices-perf.yml with a Postgres service container and a 2M-row seed) and makes it a merge gate, but changes to CI workflows under .github/workflows/ are explicitly out of scope (owned by the platform team until the Q3 upgrade).",
+      "location": "plan.md step 8, Test strategy; spec.md Out of scope; fixture/.github/workflows/ci.yml",
+      "expected_lenses": ["lens-spec-coverage"],
       "severity": "major"
     },
     {
       "id": "D4",
-      "description": "Plan removes offset support, but R6/AC5 require offset to keep working for 90 days with Deprecation and Link headers and a 400 invalid_pagination when combined with cursor. Removing offset is explicitly out of scope.",
-      "location": "plan.md step 6; spec.md R6, Out of scope",
-      "expected_lenses": [
-        "lens-spec-coverage"
-      ],
-      "severity": "blocker"
+      "description": "The test strategy runs keyset tests through the existing fakeDb in test/invoices.test.ts, which matches SQL by substring, ignores WHERE/ORDER BY and reads params positionally as [tenant, limit, offset], so the new keyset query (and AC1 page boundaries) is not actually exercised. AC1 is tested only with distinct timestamps; there are no tests for cross-tenant cursors (AC2), filter-mismatched cursors (AC3) or offset deprecation (AC5); the garbage-cursor test asserts the first page, the opposite of AC4.",
+      "location": "plan.md Test strategy; fixture/test/invoices.test.ts",
+      "expected_lenses": ["lens-tests"],
+      "severity": "major"
     },
     {
       "id": "D5",
-      "description": "Step 1 ships a DDL migration (new index) despite the NFR change freeze that bans migrations in this release.",
-      "location": "plan.md step 1; spec.md Non-functional constraints",
-      "expected_lenses": [
-        "lens-consistency",
-        "lens-spec-coverage"
-      ],
+      "description": "Step 2 selects created_at via to_char(... 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), which drops the milliseconds clients get today (the pg Date serialised by res.json, e.g. 2024-05-01T09:30:00.000Z). This changes the invoice representation in data, contradicting R4 (items keep today's format, with the explicit example) and the plan's own claim that other columns are unchanged.",
+      "location": "plan.md step 2; spec.md R4; fixture/src/repos/invoiceRepo.ts",
+      "expected_lenses": ["lens-consistency"],
       "severity": "major"
     },
     {
       "id": "D6",
-      "description": "The performance reasoning is wrong. An index on (tenant_id, status) does not serve ORDER BY created_at DESC, id DESC, so for a common status like 'paid' Postgres may choose it and then sort a large share of 2M rows, missing AC6. Performance is only checked after rollout prep, by EXPLAIN on staging.",
-      "location": "plan.md step 1; plan.md Test strategy; fixture/migrations/003_invoices.sql",
-      "expected_lenses": [
-        "lens-risk"
-      ],
-      "severity": "major"
+      "description": "The cursor timestamp is the truncated created_at string (step 7 uses the step 2 value, whole seconds), while created_at is a timestamptz defaulting to now() with microsecond precision (migration 003). The predicate (created_at, id) < ($c, $i) then excludes every remaining row whose created_at lies between the truncated value and the real one, so rows are skipped at page boundaries; with 60 invoices sharing one bulk-import timestamp (AC1), pages 2 and 3 lose the rest of the batch. Violates R2/AC1.",
+      "location": "plan.md steps 2 and 7; fixture/migrations/003_invoices.sql",
+      "expected_lenses": ["lens-risk"],
+      "severity": "blocker"
     },
     {
       "id": "D7",
-      "description": "No tests for the shared-timestamp boundary (AC1 is only tested with distinct timestamps), cross-tenant cursor reuse (AC2), filter mismatch (AC3) or offset deprecation (AC5), and the garbage-cursor test asserts the opposite of AC4.",
-      "location": "plan.md Test strategy",
-      "expected_lenses": [
-        "lens-tests"
-      ],
-      "severity": "major"
+      "description": "Step 6 removes offset support and silently serves offset requests as a first page, but R6/AC5 require offset to keep working as today for 90 days with Deprecation: true and a Link header, and offset+cursor must return 400 invalid_pagination. Removing offset is explicitly out of scope.",
+      "location": "plan.md step 6; spec.md R6, AC5, Out of scope",
+      "expected_lenses": ["lens-spec-coverage"],
+      "severity": "blocker"
     }
   ],
   "tensions": [
     {
       "id": "T1",
-      "lenses": [
-        "lens-consistency",
-        "lens-risk"
-      ],
-      "related_defects": [
-        "D5",
-        "D6"
-      ],
-      "description": "Consistency wants the migration removed because of the DDL freeze. Risk sees that the planned index doesn't serve the sort and wants the migration changed to a better composite index, such as (tenant_id, status, created_at, id). One fix deletes the migration and the other rewrites it. The way out depends on noticing that migration 003 already defines (tenant_id, created_at DESC, id DESC).",
-      "lens_a_fix": "Drop migrations/004 entirely; no DDL ships during the freeze.",
-      "lens_b_fix": "Replace the (tenant_id, status) index with a composite index matching the filter plus sort order so AC6 holds.",
-      "reconciliation": "Ship no migration. Write the keyset query as (created_at, id) < ($c, $i) with ORDER BY created_at DESC, id DESC so it walks the existing invoices_tenant_created_idx from 003, applying status and created_after as filters during the walk. Verify AC6 with EXPLAIN ANALYZE before rollout. Note a status-leading composite index as a post-freeze follow-up if the filtered path proves slow.",
+      "lenses": ["lens-architecture", "lens-consistency"],
+      "related_defects": ["D1", "D2"],
+      "description": "Architecture's natural fix is to delete the hand-rolled helpers and use encodeCursor/decodeCursor the way routes/customers.ts does. That caller treats a null decode result, or a cursor whose t differs from the tenant, as 'no cursor' and serves the first page, and binds only the tenant. Copying it reproduces exactly what consistency flags. Consistency's natural fix is to return 400 invalid_cursor on any bad cursor; once the shared decodeCursor is in use, the obvious place to throw is that helper, but customers.ts depends on its null return, so throwing there changes /v1/customers (out of scope; NFR: no change to other list endpoints). Architecture's evidence is in lib/pagination.ts and customers.ts; consistency's is in spec R3/R5/AC2-AC4 and plan step 4.",
+      "lens_a_fix": "Remove encodeInvoiceCursor/decodeInvoiceCursor and use encodeCursor/decodeCursor from src/lib/pagination.ts with deps.cursorSecret, following routes/customers.ts (payload plus t: tenantId, tenant check on decode).",
+      "lens_b_fix": "Return 400 invalid_cursor for malformed, tampered, wrong-tenant and wrong-filter cursors instead of serving the first page; bind the filters into the cursor.",
+      "reconciliation": "Reuse the signed encodeCursor/decodeCursor, with payload {c, i, t: tenantId, f: canonical status+created_after}. In the invoices route only, throw ValidationError('invalid_cursor') when decodeCursor returns null or t/f differ from the request. Do not change decodeCursor's null contract or customers.ts, because /v1/customers relies on the first-page fallback (architecture's fact) and is out of scope; consistency supplies the 400 and filter-binding requirement.",
       "subtle": true
     },
     {
       "id": "T2",
-      "lenses": [
-        "lens-architecture",
-        "lens-consistency"
-      ],
-      "related_defects": [
-        "D1",
-        "D3"
-      ],
-      "description": "Architecture's natural fix is to reuse decodeCursor and copy the /v1/customers pattern. That pattern deliberately treats a null (invalid) cursor, or one from another tenant, as 'start from the first page'. Consistency requires 400 invalid_cursor for malformed, tampered or mismatched cursors. Copying the existing route's behaviour reproduces the defect consistency flags, and making the shared helper throw would change /v1/customers, which is out of scope.",
-      "lens_a_fix": "Delete the hand-rolled helpers; use encodeCursor/decodeCursor from lib/pagination.ts the way routes/customers.ts does, including the tenant check.",
-      "lens_b_fix": "Return 400 invalid_cursor for malformed, tampered, wrong-tenant, or wrong-filter cursors per R5/AC2-AC4.",
-      "reconciliation": "Reuse encodeCursor/decodeCursor with the payload {c, i, t: tenantId, f: filter hash}. In the invoices route only, throw ValidationError('invalid_cursor') when decodeCursor returns null or t or f mismatch. Leave lib/pagination.ts and /v1/customers unchanged, since altering the shared helper would change customers' behaviour and that is out of scope.",
+      "lenses": ["lens-tests", "lens-spec-coverage"],
+      "related_defects": ["D4", "D3"],
+      "description": "Tests sees that the fakeDb in test/invoices.test.ts ignores the SQL and reads positional offset params, so AC1-AC3 need a real database; the natural fix is Postgres-backed integration tests in CI, for example in the Postgres job the plan adds in step 8 or as a service in ci.yml. Spec-coverage sees that any change under .github/workflows/ is out of scope and wants the step 8 workflow dropped, with AC6 checked outside CI. Each fix looks complete alone; together, the tests' fix needs exactly the CI change spec-coverage removes.",
+      "lens_a_fix": "Run the invoice keyset tests (60 shared-timestamp rows, cross-tenant, filter mismatch, garbage cursor) against a real Postgres in CI, reusing the step 8 Postgres service or adding one to ci.yml.",
+      "lens_b_fix": "Delete .github/workflows/invoices-perf.yml from the plan; touching CI workflows is out of scope.",
+      "reconciliation": "No CI workflow changes. Keep the tests inside the existing `npm test` job: replace the positional-offset fakeDb for invoice queries with an in-memory store that applies tenant, status, created_after and (created_at, id) DESC keyset ordering, add the AC1 (60 shared timestamps, microsecond values), AC2, AC3, AC4 (400) and AC5 tests there, and assert the SQL/params listInvoices emits. Move AC6 verification to a timed run or EXPLAIN ANALYZE against staging before the canary. Needs the tests fact (fakeDb cannot evaluate the query) and the spec-coverage fact (CI workflows are out of scope).",
+      "subtle": false
+    },
+    {
+      "id": "T3",
+      "lenses": ["lens-risk", "lens-consistency"],
+      "related_defects": ["D6", "D5"],
+      "description": "Both defects come from the same to_char expression in step 2, which step 7 reuses for the cursor. Risk, from migration 003 (timestamptz DEFAULT now(), microseconds) and the bulk-import note in R2, sees boundary rows skipped and naturally fixes it by selecting full precision (for example the format with .US, or created_at::text) as the created_at column. That changes data again, which consistency rejects. Consistency, from R4's format example and today's pg Date serialisation, wants the format restored to milliseconds (.MS); the cursor still truncates sub-millisecond values, so risk's skip remains. The conflict is on one detail: the precision of a single shared value.",
+      "lens_a_fix": "Make the cursor timestamp full precision by changing step 2 to select created_at with microseconds (to_char ... .US or created_at::text).",
+      "lens_b_fix": "Restore created_at in data to today's ISO 8601 millisecond format (2024-05-01T09:30:00.000Z), e.g. by selecting the native column or to_char with .MS.",
+      "reconciliation": "Decouple the two uses: keep created_at in data exactly as today (native column serialised by res.json, or .MS), and select a separate full-precision value only for the cursor (e.g. created_at::text or extract(epoch) in microseconds AS cursor_ts, not returned in data), comparing (created_at, id) < ($c::timestamptz, $i) so the 003 index still serves the walk. Needs risk's fact (microsecond storage and shared bulk timestamps) and consistency's fact (data format must not change).",
       "subtle": true
     }
   ]

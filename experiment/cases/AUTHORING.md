@@ -63,10 +63,12 @@ In the pilot, a single round of the five lenses found every seeded defect and re
 - **Each side's obvious fix must look complete.** To the lens that raises it, its natural fix should look correct and finished. The conflict only shows up when the two fixes are put together.
 - **The reconciliation must need the other side's fact.** It must not be a one-parameter tweak sitting right next to the problem, like an override on the same function. Prefer reconciliations that a lens can only reach by using a fact from the other lens's area: an ordering, a limit, a default, a flag, or a narrower scope.
 - **Don't hint at the conflict.** No plan sentence should mention both concerns, and no spec line should foreshadow the clash.
-- **Make most defects subtle.** At least half the defects should be detectable only by checking a detail of the plan against the fixture or spec: a numeric limit, an ordering, a default, an error code, a field name, a timeout unit. Use at most two head-on defects, such as a missing requirement.
+- **Keep the reconciling fact out of the reusing lens's file.** When one side's natural fix is "reuse module X", the detail that makes the plain reuse unsafe, and the switch or variant that fixes it, must not both sit in X. Put the hazard in a caller, a config default, or a shared helper X depends on. In the calibration, both cases that broke this rule (a cache's refresh-on-hit default in the cache's own file; an output helper's indentation in the helper itself) were still fully reconciled by a single lens.
+- **Prefer 3 tensions per case,** with lens pairs that differ across the case's tensions, so a case doesn't rely on one lens pair.
+- **Defects don't need to be hidden.** Recall is a guardrail: it only has to show a drop, so a baseline at 100% recall is fine. Mix subtle and head-on defects naturally, and spend the difficulty budget on the tensions.
 - **Don't telegraph defects.** Avoid plan phrasing that invites scrutiny ("for simplicity", "we assume", "temporarily"). Write the plan with the same confidence everywhere.
 
-Target, checked with a `none`-only pilot: one round should miss or leave unreconciled a real share. Aim for `none` recall of about 0.6 to 0.85, and at most half of tensions reconciled.
+Target, checked with a `baseline`-only run: at most half of tensions reconciled. In the first calibration, cases that followed these rules reconciled 1 of 7 tensions; the two that broke the reuse rule below reconciled 4 of 4.
 
 ## ground_truth.json
 

@@ -5,111 +5,91 @@
   "defects": [
     {
       "id": "D1",
-      "description": "PUT is implemented as a partial merge (absent fields keep their stored values), but R2 specifies full replacement with all fields required and 422 invalid_preferences when any is missing. AC2's round-trip semantics differ as well.",
-      "location": "plan.md step 4; spec.md R2",
-      "expected_lenses": [
-        "lens-consistency"
-      ],
+      "description": "Step 5 adds a local writePrefsError that writes a flat {code, field} body, bypassing httpx.Error and the {\"error\": {code, message, details}} envelope that every existing endpoint returns (devices.RegisterHandler uses httpx.Error with details.field for 422s).",
+      "location": "plan.md step 5; fixture/internal/httpx/httpx.go; fixture/internal/devices/handler.go",
+      "expected_lenses": ["lens-architecture"],
       "severity": "major"
     },
     {
       "id": "D2",
-      "description": "The quiet-hours check startMin <= now < endMin is wrong for windows that cross midnight (22:00-07:00 never matches), so AC3 fails. The planned tests only use a same-day 09:00-17:00 window and miss the case.",
-      "location": "plan.md step 6; plan.md Test strategy",
-      "expected_lenses": [
-        "lens-risk",
-        "lens-tests"
-      ],
-      "severity": "blocker"
+      "description": "Error codes and field paths drift from R3/AC4: bad_timezone instead of invalid_timezone, and Go struct names (QuietHours.TZ, Categories.Social) instead of JSON paths (quiet_hours.timezone, categories.social). AC4 fails.",
+      "location": "plan.md step 5; spec.md R3, AC4",
+      "expected_lenses": ["lens-consistency"],
+      "severity": "major"
     },
     {
       "id": "D3",
-      "description": "Handlers take *sql.DB and run SQL inline, bypassing the repository layering the codebase uses (devices.Repo is the only code touching its table). It also leaves the sender's prefs reader without a clear owner.",
-      "location": "plan.md steps 3-4; fixture/internal/devices/repo.go",
-      "expected_lenses": [
-        "lens-architecture"
-      ],
-      "severity": "minor"
+      "description": "InQuietHours uses startMin <= nowMin < endMin, which never matches a window that crosses midnight (22:00-07:00), so AC3 fails. The planned quiet_test only uses a same-day 09:00-17:00 window and no sender test covers AC3's 22:00-07:00 Berlin cases (23:30 suppressed, 07:00 delivered).",
+      "location": "plan.md step 6; plan.md Test strategy; spec.md R4, AC3",
+      "expected_lenses": ["lens-risk", "lens-tests"],
+      "severity": "blocker"
     },
     {
       "id": "D4",
-      "description": "Step 8 implements deferred delivery after quiet hours end, which is explicitly out of scope ('Delivering suppressed notifications after quiet hours end'). R5 says skipped notifications are dropped.",
-      "location": "plan.md step 8; spec.md Out of scope, R5",
-      "expected_lenses": [
-        "lens-spec-coverage",
-        "lens-consistency"
-      ],
+      "description": "Timezone validation and quiet-hours conversion use time.LoadLocation, but both binaries are built CGO_ENABLED=0 into distroless/static, which ships no zoneinfo. Every timezone would fail validation and quiet hours could not be evaluated unless time/tzdata is embedded (import _ \"time/tzdata\" or -tags timetzdata).",
+      "location": "plan.md steps 5-6; fixture/Dockerfile",
+      "expected_lenses": ["lens-risk"],
       "severity": "major"
     },
     {
       "id": "D5",
-      "description": "The deferral queue is an unbounded in-process slice with a polling goroutine. Entries are lost on every restart or deploy, memory grows without limit, and with several worker replicas the delivery behaviour is inconsistent.",
-      "location": "plan.md step 8",
-      "expected_lenses": [
-        "lens-risk"
-      ],
+      "description": "Step 7 fails open: when the preferences lookup fails, Send continues with Defaults() (all categories enabled), so a user who turned marketing off receives marketing pushes during any database error. This contradicts the spec's non-functional constraint that a marketing push must never reach a user whose saved preferences turn marketing off.",
+      "location": "plan.md step 7; spec.md Non-functional constraints (marketing consent)",
+      "expected_lenses": ["lens-consistency"],
       "severity": "major"
     },
     {
       "id": "D6",
-      "description": "A local writePrefsError emits a flat body, bypassing httpx.Error and the {error:{code,message,details}} envelope that every endpoint returns and that the mobile apps' shared API client decodes.",
-      "location": "plan.md step 5; fixture/internal/httpx/respond.go",
-      "expected_lenses": [
-        "lens-architecture"
-      ],
-      "severity": "major"
+      "description": "The new Prefs.Get lookup in Send has no deadline. The worker's job loop calls Send with context.Background() and Sender.Timeout only wraps the per-device Push, so a slow or stalled notification_preferences query blocks the sequential batch (while it holds the FOR UPDATE SKIP LOCKED transaction) and breaks the 5 ms p99 sender budget. The lookup needs its own short timeout.",
+      "location": "plan.md step 7; fixture/cmd/worker/main.go; fixture/internal/push/sender.go",
+      "expected_lenses": ["lens-risk"],
+      "severity": "minor"
     },
     {
       "id": "D7",
-      "description": "Error codes and field paths drift from the spec: bad_timezone instead of invalid_timezone, and Go struct paths (QuietHours.TZ) instead of JSON paths (quiet_hours.timezone). That breaks AC4.",
-      "location": "plan.md step 5; spec.md R3, AC4",
-      "expected_lenses": [
-        "lens-consistency"
-      ],
-      "severity": "major"
+      "description": "Step 8 hand-rolls a CachedReader (map + RWMutex) instead of reusing internal/cache.TTL, the bounded TTL cache the worker already uses through devices.NewCachedRepo in cmd/worker/main.go.",
+      "location": "plan.md step 8; fixture/internal/cache/ttl.go; fixture/internal/devices/repo.go; fixture/cmd/worker/main.go",
+      "expected_lenses": ["lens-architecture"],
+      "severity": "minor"
     },
     {
       "id": "D8",
-      "description": "Timezone validation and conversion use time.LoadLocation, but the image is CGO_ENABLED=0 on distroless/static, which ships no zoneinfo. Every timezone would fail validation and quiet hours could not be evaluated unless time/tzdata is embedded.",
-      "location": "plan.md steps 5-6; fixture/Dockerfile",
-      "expected_lenses": [
-        "lens-risk"
-      ],
-      "severity": "major"
+      "description": "The CachedReader never expires entries and is unbounded. The API and the worker are separate processes (cmd/api, cmd/worker; three worker replicas in deploy/worker.yaml) and each builds its own CachedReader, so PutHandler's Invalidate only clears the API's copy. The worker keeps serving the first document it read until restart, violating the 60-second constraint and AC3 in production, and memory grows with every user pushed.",
+      "location": "plan.md steps 8-9; fixture/cmd/worker/main.go; fixture/deploy/worker.yaml; spec.md Non-functional constraints",
+      "expected_lenses": ["lens-risk"],
+      "severity": "blocker"
     }
   ],
   "tensions": [
     {
       "id": "T1",
-      "lenses": [
-        "lens-spec-coverage",
-        "lens-risk"
-      ],
-      "related_defects": [
-        "D4",
-        "D5"
-      ],
-      "description": "Spec-coverage flags the deferral queue as out-of-scope work and wants it removed. Risk, looking at the same step, wants the queue made durable and bounded (persisted table, replica-safe scheduler). Hardening it adds more infrastructure to a feature the spec excludes, so the two fixes point in opposite directions.",
-      "lens_a_fix": "Remove step 8; suppressed notifications are dropped per R5 and the out-of-scope list.",
-      "lens_b_fix": "Persist deferred notifications in a table with a bounded size and a replica-safe scheduler so nothing is lost on restart.",
-      "reconciliation": "Remove deferral entirely. Drop suppressed pushes and count them with push_suppressed_total{reason=\"quiet_hours\"}. That removes the durability risk instead of engineering around it. Record deferral as a possible follow-up spec.",
-      "subtle": false
+      "lenses": ["lens-risk", "lens-consistency"],
+      "related_defects": ["D6", "D5"],
+      "description": "Risk wants the unbounded preferences lookup given a short timeout; consistency wants the fail-open fallback replaced by fail-closed (return the error, send nothing) to honour marketing consent. Together, every lookup timeout or error now makes Send return an error. Two facts sit elsewhere: the worker's runBatch (cmd/worker/main.go) deletes each job after one attempt whatever Send returns, and step 7 runs the lookup before the security bypass. So the combined fixes permanently drop every push during a slow query, including security pushes that R4 says are always delivered. Neither fix shows the problem alone: with fail-open a timeout is harmless, and without a timeout fail-closed only fires on hard errors.",
+      "lens_a_fix": "Wrap Prefs.Get in a short context.WithTimeout so a slow preferences query cannot stall the worker or blow the 5 ms budget.",
+      "lens_b_fix": "On a lookup error, return the error from Send and deliver nothing, so a marketing opt-out is never overridden by Defaults().",
+      "reconciliation": "Keep the timeout, but move the security bypass ahead of the lookup so security pushes never depend on the preferences table. On lookup error or timeout, fail closed only for marketing (the one category the spec ties to consent) and deliver social and reminders under Defaults(). Do not rely on returning the error, because runBatch deletes the job after a single attempt. This needs risk's fact (at-most-once job deletion in cmd/worker/main.go, plus the lookup-before-security ordering) and consistency's fact (the consent constraint covers marketing only).",
+      "subtle": true
     },
     {
       "id": "T2",
-      "lenses": [
-        "lens-architecture",
-        "lens-consistency"
-      ],
-      "related_defects": [
-        "D6",
-        "D7"
-      ],
-      "description": "Architecture wants the custom error writer replaced with httpx.Error so the response uses the shared envelope the mobile client decodes. Consistency wants the error body to match the spec exactly: flat {code, field}, invalid_timezone, quiet_hours.timezone. Switching to httpx.Error makes the body shape differ from the spec, while matching the spec literally keeps a one-off shape that the apps' shared decoder won't parse. The conflict only shows if you read respond.go and its envelope comment.",
-      "lens_a_fix": "Use httpx.Error(w, 422, code, msg, details) like the devices handler does.",
-      "lens_b_fix": "Emit exactly {\"code\": \"invalid_timezone\", \"field\": \"quiet_hours.timezone\"} as R3/AC4 specify.",
-      "reconciliation": "Use httpx.Error with status 422, the spec's code names, and details.field set to the JSON path, as devices.RegisterHandler already does. Flag to the spec owner that the flat shape in R3/AC4 differs from the API-wide envelope, and get AC4 amended so it asserts error.code and error.details.field. Do not ship a one-off body shape.",
+      "lenses": ["lens-architecture", "lens-risk"],
+      "related_defects": ["D7", "D8"],
+      "description": "Architecture wants the hand-rolled CachedReader replaced by internal/cache.TTL, wired the way cmd/worker/main.go wires devices.NewCachedRepo with the shared CACHE_TTL/CACHE_SIZE. That looks right: the code default for CACHE_TTL is 1 minute. Risk wants the never-expiring cache given its own short expiry (for example 30 s) and a size bound, since cross-process Invalidate cannot reach the worker. The fixes conflict on the TTL. deploy/worker.yaml sets CACHE_TTL=10m, so the reuse as wired would serve preferences up to 10 minutes stale and break the 60-second constraint. Risk's version keeps a second bespoke cache.",
+      "lens_a_fix": "Delete prefs/cache.go and wrap the prefs repo with cache.New(cacheSize, cacheTTL) in cmd/worker/main.go, as the devices repo is.",
+      "lens_b_fix": "Add a 30-second expiry and a maximum size to CachedReader and stop relying on PutHandler's Invalidate for the worker.",
+      "reconciliation": "Reuse internal/cache.TTL, but give preferences their own TTL of 60 s or less (for example a PREFS_CACHE_TTL defaulting to 30s) and their own size, not the shared CACHE_TTL that deploy/worker.yaml overrides to 10m. Drop cross-process Invalidate as a correctness mechanism; the API can read through without caching. This needs architecture's fact (internal/cache.TTL and the worker's wiring) and risk's fact (separate API and worker processes, plus the 10m production value in deploy/worker.yaml against the spec's 60 s).",
       "subtle": true
+    },
+    {
+      "id": "T3",
+      "lenses": ["lens-architecture", "lens-consistency"],
+      "related_defects": ["D1", "D2"],
+      "description": "Architecture wants writePrefsError replaced with httpx.Error so the body uses the API-wide {\"error\": {...}} envelope. Consistency wants the body to match R3/AC4 literally: flat {code, field} with invalid_timezone and quiet_hours.timezone. Switching to httpx.Error changes the shape AC4 asserts, while fixing the drift literally keeps a one-off body shape no other endpoint uses.",
+      "lens_a_fix": "Use httpx.Error(w, 422, code, message, details) like devices.RegisterHandler.",
+      "lens_b_fix": "Emit exactly {\"code\": \"invalid_timezone\", \"field\": \"quiet_hours.timezone\"} with the spec's codes and JSON paths.",
+      "reconciliation": "Use httpx.Error with status 422, the spec's code names (invalid_preferences, invalid_time, invalid_timezone) and details.field set to the JSON path, following the details.field convention in devices/handler.go. Flag to the spec owner that R3/AC4's flat shape differs from the envelope every endpoint returns, and get AC4 amended to assert error.code and error.details.field.",
+      "subtle": false
     }
   ]
 }

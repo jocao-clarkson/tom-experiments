@@ -10,6 +10,14 @@ import (
 	"github.com/ledgerly/iam/internal/store"
 )
 
+// Routes builds the public API handler.
+func Routes(v *apikey.Verifier, keys *KeysAPI) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("POST /v1/service-accounts/{id}/keys", Authenticate(v, RequireScope("keys:admin", keys.Create)))
+	mux.Handle("GET /v1/service-accounts/{id}/keys", Authenticate(v, RequireScope("keys:read", keys.List)))
+	return mux
+}
+
 type ctxKey struct{}
 
 func Authenticate(v *apikey.Verifier, next http.Handler) http.Handler {

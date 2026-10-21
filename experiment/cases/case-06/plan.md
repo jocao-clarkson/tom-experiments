@@ -8,7 +8,7 @@ We add `listInvoices` in `internal/httpapi/invoices.go` and `Invoices.List` in `
 
 1. **Store query builder** (`internal/store/invoices.go`). Add `ListOptions{Statuses []string; CustomerID string; CreatedAfter, CreatedBefore *time.Time; Sort string; After *After; Offset, Limit int}`. Build the `WHERE` clause with `github.com/Masterminds/squirrel` (Postgres placeholder format), since the combination of optional filters makes hand-concatenated SQL error-prone. Every query starts from `squirrel.Eq{"tenant_id": tenantID}` (R1, AC4).
 
-2. **Created-at sorts** (`internal/store/invoices.go`). For `-created_at` and `created_at`, apply `(created_at, id) < ($a, $b)` or `>` from `After` and order by `created_at, id` in the matching direction, fetching `limit+1` rows the way `Customers.List` does. This uses the existing `(tenant_id, created_at DESC, id DESC)` index.
+2. **Created-at sorts** (`internal/store/invoices.go`). For `-created_at` and `created_at`, apply `(created_at, id) < ($a, $b)` or `>` from `After` and order by `created_at, id` in the matching direction, decoding `After` from the shared cursor and fetching `limit+1` rows the way `Customers.List` does. This uses the existing `(tenant_id, created_at DESC, id DESC)` index.
 
 3. **Amount sorts** (`internal/store/invoices.go`). For `-amount` and `amount`, order by `amount_cents, id` with `OFFSET` and `LIMIT limit+1`.
 
@@ -16,7 +16,7 @@ We add `listInvoices` in `internal/httpapi/invoices.go` and `Invoices.List` in `
 
 5. **Parameter parsing** (`internal/httpapi/invoices.go`). Parse `status` by splitting on commas and checking against the four allowed values. Parse `customer_id` as is. Parse `created_after` and `created_before` with `time.Parse(time.RFC3339, ...)`; values that fail to parse are skipped, so that clients sending date-only strings still get results. Validate `sort` against the four values. Reuse `parseLimit` and `decodeCursor`.
 
-6. **Invoice error helper** (`internal/httpapi/invoices.go`). Add `writeInvoiceError(w, field, msg)`, which writes `400` with `{"error": {"code": "bad_request", "field": "<name>", "message": "..."}}`. The shared `writeError` has no slot for the parameter name, and changing it would affect every endpoint.
+6. **Parameter errors** (`internal/httpapi/invoices.go`). Add `writeInvoiceError(w, field, msg)`, which writes `400` with `{"error": {"code": "bad_request", "field": "<name>", "message": "..."}}` so integrators can see which parameter was rejected. Every parsing failure from step 5 goes through it.
 
 7. **Handler** (`internal/httpapi/invoices.go`). `listInvoices(s InvoiceLister)` reads the tenant from `auth.TenantID`, calls the store, trims to `limit`, and sets `next_cursor` (created-at sorts) or `next_page` (amount sorts). Each item is a `store.Invoice`, the same struct `Get` returns (R6). Empty results return `"data": []`.
 
@@ -39,5 +39,5 @@ We add `listInvoices` in `internal/httpapi/invoices.go` and `Invoices.List` in `
 
 - The endpoint is additive and goes out behind no flag. The API changelog will announce it once SDK support lands.
 - We will check `EXPLAIN ANALYZE` against the largest tenant on the staging snapshot before release.
-- Amount sorting is expected to be used mainly for small result sets (filtered by customer or status), so offset pagination is acceptable there.
+- The SDK pagination helpers will follow `next_page` as well as `next_cursor`; the SDK team gets the field names from the step 9 docs.
 - `squirrel` is a small, widely used library with no transitive dependencies. We'll mention it in the PR for platform sign-off.

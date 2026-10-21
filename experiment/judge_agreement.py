@@ -2,7 +2,8 @@
 compare the answers.
 
 Each repeat is a fresh judge session on identical inputs, saved as
-<run>/agreement/<task>.r<k>.json, so an interrupted batch resumes. Nothing
+<run>/agreement/<task>.<prompt hash>.r<k>.json, so an interrupted batch
+resumes and repeats made with an edited prompt are kept apart. Nothing
 here touches judge.json.
 
     py experiment\\judge_agreement.py --run-id pilot --task contradictions --reps 3
@@ -10,6 +11,7 @@ here touches judge.json.
 """
 
 import argparse
+import hashlib
 import itertools
 import json
 import sys
@@ -30,9 +32,11 @@ def judge_repeats(rdir, task, reps, args):
     data = judge.build_inputs(rounds, json.loads(gt_path.read_text(encoding="utf-8")), meta["technique"])[task]
     out = rdir / "agreement"
     out.mkdir(exist_ok=True)
+    # Keyed by the prompt, so repeats from an edited prompt never mix.
+    version = hashlib.sha256((judge.PROMPTS / f"judge-{task}.md").read_bytes()).hexdigest()[:8]
     answers = []
     for k in range(1, reps + 1):
-        path = out / f"{task}.r{k}.json"
+        path = out / f"{task}.{version}.r{k}.json"
         if not path.exists():
             path.write_text(json.dumps(judge.call_judge(task, data, args), indent=2, ensure_ascii=False),
                             encoding="utf-8")

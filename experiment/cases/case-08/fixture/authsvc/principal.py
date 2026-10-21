@@ -1,9 +1,10 @@
 from dataclasses import dataclass, field
+from functools import lru_cache
 
 import jwt
 from fastapi import Depends, HTTPException, Request
 
-from . import orgs
+from .cache import TTLMemo
 from .settings import Settings, get_settings
 
 
@@ -26,6 +27,22 @@ class Principal:
             raise HTTPException(status_code=403, detail={"code": "forbidden"})
 
 
+@lru_cache
+def _org_memo() -> TTLMemo:
+    return TTLMemo(ttl=get_settings().cache_ttl_seconds, maxsize=4096)
+
+
+def org_is_active(db, org_id: str) -> bool:
+    """True if the org exists and is not suspended."""
+
+    def load() -> bool:
+        with db.transaction() as conn:
+            row = conn.execute("SELECT suspended_at FROM orgs WHERE id = %s", (org_id,)).fetchone()
+        return row is not None and row[0] is None
+
+    return _org_memo().get_or_load(org_id, load)
+
+
 def _bearer(request: Request) -> str:
     header = request.headers.get("authorization", "")
     scheme, _, value = header.partition(" ")
@@ -41,7 +58,7 @@ def current_principal(request: Request, settings: Settings = Depends(get_setting
         claims = jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
     except jwt.PyJWTError:
         raise HTTPException(status_code=401, detail={"code": "unauthenticated"})
-    if not orgs.is_active(request.app.state.db, claims["org"]):
+    if not org_is_active(request.app.state.db, claims["org"]):
         raise HTTPException(status_code=401, detail={"code": "unauthenticated"})
     return Principal(
         subject=claims["sub"],

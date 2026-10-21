@@ -1,9 +1,10 @@
-import { decodeCursor, encodeCursor, parseLimit, toPage, MAX_LIMIT } from "../src/lib/pagination";
+import { config } from "../src/config";
+import { decodeCursor, encodeCursor, parseLimit, toPage } from "../src/lib/pagination";
 
 describe("pagination", () => {
   it("defaults and clamps limit", () => {
-    expect(parseLimit(undefined)).toBe(20);
-    expect(parseLimit("500")).toBe(MAX_LIMIT);
+    expect(parseLimit(undefined)).toBe(config.paging.defaultLimit);
+    expect(parseLimit("500")).toBe(config.paging.maxLimit);
     expect(() => parseLimit("0")).toThrow("limit must be a positive integer");
   });
 

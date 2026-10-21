@@ -9,7 +9,7 @@ Profiles currently show initials only. Users should be able to upload a photo fr
 
 ## Functional requirements
 
-- **R1.** `PUT /v1/me/avatar` accepts the image either as the raw request body or as `multipart/form-data` with a single `file` part. In both modes the **image itself** may be up to 5 MB (5,242,880 bytes).
+- **R1.** `PUT /v1/me/avatar` accepts the image either as the raw request body or as `multipart/form-data` with a single `file` part. In both modes the image may be up to 5 MB (5,242,880 bytes).
 - **R2.** The image type is determined by content sniffing. Client-supplied `Content-Type` headers and filenames are ignored. Only JPEG and PNG are accepted; anything else returns `415 unsupported_media_type`.
 - **R3.** Images above **40 megapixels** return `422 image_too_large`. Images over 5 MB return `413 body_too_large`.
 - **R4.** The server produces square JPEGs at 512×512 and 128×128 and stores them at `avatars/{userId}/v{version}/{size}.jpg`, where `version` increments with every successful upload.
@@ -30,7 +30,7 @@ Profiles currently show initials only. Users should be able to upload a photo fr
 
 - p95 under 2 s for a 5 MB upload, measured server-side.
 - Memory per request must be bounded. The pods have 512 MB and serve about 40 concurrent requests.
-- No new dependencies beyond `golang.org/x/image`, which is already in use.
+- No new modules in `go.mod`. Image work uses the standard library and `golang.org/x/image`, which is already in use.
 - Signed URLs are valid for exactly 1 hour.
 
 ## Out of scope

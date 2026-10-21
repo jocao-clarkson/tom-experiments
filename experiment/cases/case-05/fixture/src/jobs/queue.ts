@@ -10,10 +10,7 @@ export interface EnqueueOptions {
 
 export type Handler<T> = (payload: T) => Promise<void>;
 
-/**
- * Background jobs backed by pg-boss. A handler that throws is retried as a
- * whole, with exponential backoff, until attempts are used up.
- */
+/** Background jobs backed by pg-boss. */
 export class JobQueue {
   constructor(private readonly boss: PgBoss) {}
 

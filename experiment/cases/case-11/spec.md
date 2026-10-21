@@ -26,7 +26,7 @@ Support agents currently issue refunds by logging in to the PayCore dashboard, s
 
 ## Non-functional constraints
 
-- PayCore decline payloads include the cardholder's billing address, card last4 and card fingerprint. None of these may appear in our logs or API responses.
+- Cardholder data (billing address, any card number digits, card fingerprint) must never appear in our logs or API responses.
 - Outbound calls must have a timeout; p95 of the endpoint should stay under 1.5 s.
 - No new third-party dependencies.
 

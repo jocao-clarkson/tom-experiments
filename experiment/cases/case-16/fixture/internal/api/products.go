@@ -76,6 +76,26 @@ func (h *ProductsHandler) UpdatePrice(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (h *ProductsHandler) Quote(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SKUs []string `json:"skus"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.SKUs) == 0 {
+		apierr.Write(w, http.StatusBadRequest, "bad_request", "skus required", nil)
+		return
+	}
+	lines, err := h.Store.QuoteLines(r.Context(), req.SKUs)
+	if errors.Is(err, store.ErrBusy) {
+		apierr.Write(w, http.StatusServiceUnavailable, "busy", "try again", nil)
+		return
+	}
+	if err != nil {
+		apierr.Write(w, http.StatusInternalServerError, "internal", "internal error", nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, lines)
+}
+
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

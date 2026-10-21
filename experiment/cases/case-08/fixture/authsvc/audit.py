@@ -2,22 +2,14 @@ import json
 import logging
 from datetime import datetime, timezone
 
+from .redact import scrub
+
 log = logging.getLogger("authsvc.audit")
-
-SENSITIVE_KEYS = {"password", "secret", "token", "recovery_code", "api_key"}
-
-
-def scrub(data: dict) -> dict:
-    """Drop known-sensitive keys (recursively) before anything is persisted."""
-    out = {}
-    for k, v in data.items():
-        if k in SENSITIVE_KEYS:
-            continue
-        out[k] = scrub(v) if isinstance(v, dict) else v
-    return out
 
 
 class AuditLog:
+    """The one writer for audit_events."""
+
     def __init__(self, conn):
         self.conn = conn
 

@@ -5,51 +5,58 @@
   "defects": [
     {
       "id": "D1",
-      "description": "RevokeAllForUser SCANs every sess:* key and GETs each value to find a user's sessions. With ~4M live sessions this is O(total sessions) per reset (the NFR forbids it) and it is not atomic: a session created during the scan survives, weakening R4.",
+      "description": "RevokeAllForUser SCANs every sess:* key and GETs each value to find one user's sessions. With about 4M live sessions this is O(total sessions) per reset, which the spec's non-functional constraint forbids, and it is not atomic: a session created during the scan survives, weakening R4.",
       "location": "plan.md step 7; fixture/internal/session/store.go; spec.md non-functional constraints",
       "expected_lenses": ["lens-risk"],
       "severity": "major"
     },
     {
       "id": "D2",
-      "description": "Plan widens the shared session.Store interface with RevokeAllForUser, which breaks every implementation (including fakeStore in internal/httpx/middleware_test.go) and is not mentioned; it changes a shared contract for one feature.",
+      "description": "Plan adds RevokeAllForUser to the shared session.Store interface, which breaks every implementation (including fakeStore in internal/httpx/middleware_test.go) without saying so, and widens a shared contract used by login and RequireAuth for one feature.",
       "location": "plan.md step 7; fixture/internal/session/store.go; fixture/internal/httpx/middleware_test.go",
       "expected_lenses": ["lens-architecture"],
       "severity": "major"
     },
     {
       "id": "D3",
-      "description": "AC2 (token in email works once and expires after 30 minutes) is left to a manual staging check, and AC3 (old session gets 401 after reset) is only covered indirectly. No automated test of expiry or of end-to-end revocation.",
+      "description": "AC2 (emailed token works once and fails after 30 minutes) is left to a manual staging check against the real relay, and AC3 (pre-reset session cookie gets 401) is only covered indirectly; there is no automated test of token expiry or of end-to-end revocation through RequireAuth.",
       "location": "plan.md test strategy; spec.md AC2, AC3",
       "expected_lenses": ["lens-tests"],
       "severity": "major"
     },
     {
       "id": "D4",
-      "description": "Plan builds a new reset Mailer with its own http.Client posting to MAIL_RELAY_URL instead of using the existing notify.Sender/notify.Queue (and relaySender) in the fixture.",
-      "location": "plan.md step 3; fixture/internal/notify/notify.go; fixture/cmd/authd/handlers.go",
+      "description": "Plan builds a new reset Mailer with its own http.Client posting to MAIL_RELAY_URL instead of using the existing notify.Queue that main.go already constructs with relaySender (and that loginHandler already uses for new_login mail).",
+      "location": "plan.md step 3; fixture/internal/notify/notify.go; fixture/cmd/authd/main.go; fixture/cmd/authd/handlers.go",
       "expected_lenses": ["lens-architecture"],
       "severity": "major"
     },
     {
       "id": "D5",
-      "description": "Request handler issues the token and sends mail synchronously before responding, but only for existing accounts. Response time then reveals whether an account exists, and mail is delivered on the request path, both forbidden by the NFRs.",
+      "description": "Request handler calls store.Issue and sends the mail synchronously before responding, but only for existing accounts. Response time then reveals whether an account exists, and mail is delivered on the request path; both are forbidden by the non-functional constraints (R1's intent).",
       "location": "plan.md step 4; spec.md R1, non-functional constraints",
       "expected_lenses": ["lens-risk", "lens-consistency"],
       "severity": "major"
     },
     {
       "id": "D6",
-      "description": "Reset tokens are issued with a 1 hour lifetime; spec R2 requires 30 minutes.",
-      "location": "plan.md step 2; spec.md R2",
-      "expected_lenses": ["lens-consistency"],
+      "description": "On mailer errors the plan logs the recipient and the full reset link, so the raw token is written to logs; the spec says the raw token appears only in the emailed link and only its hash is persisted.",
+      "location": "plan.md step 4; spec.md non-functional constraints",
+      "expected_lenses": ["lens-consistency", "lens-risk"],
       "severity": "major"
     },
     {
       "id": "D7",
-      "description": "Per-IP limit uses httpx.RateLimit, which responds 429 when over the limit; R5 says over-limit requests must still return 202.",
-      "location": "plan.md step 5; fixture/internal/httpx/middleware.go; spec.md R5",
-      "expected_lenses": ["lens-consistency"],
+      "description": "Confirm is check-then-act: store.Lookup, then SetPassword, then an unconditional MarkUsed. Two concurrent confirms with the same token both pass Lookup and both set a password, so the token is not single-use (R2/R3); consumption is not an atomic conditional update.",
+      "location": "plan.md steps 2 and 6",
+      "expected_lenses": ["lens-risk"],
+      "severity": "major"
+    },
+    {
+      "id": "D8",
+      "description": "AC5 (a weak-password confirm returns 422 and the same link then succeeds with a valid password) is not mapped to any step or test; the test strategy only checks that a weak password returns 422, not that the token survives and works afterwards.",
+      "location": "plan.md test strategy, step 6; spec.md AC5",
+      "expected_lenses": ["lens-spec-coverage", "lens-tests"],
       "severity": "minor"
     }
   ],
@@ -58,20 +65,30 @@
       "id": "T1",
       "lenses": ["lens-risk", "lens-architecture"],
       "related_defects": ["D1", "D2"],
-      "description": "Risk's natural fix for the SCAN is a per-user session index (a user_sess:{id} set maintained on Create/Delete), which means changing RedisStore.Create, the login path and every Store implementation, i.e. an even wider change to shared session code. Architecture wants the opposite: avoid widening the shared Store contract and its blast radius. The way out depends on noticing that RequireAuth already loads the user on every request and that SetPassword already bumps password_changed_at while sessions carry IssuedAt.",
-      "lens_a_fix": "Replace SCAN with a per-user index of session IDs maintained on session create/delete, and delete via that index.",
-      "lens_b_fix": "Do not add a method to the shared session.Store interface; keep the change local to the reset feature.",
-      "reconciliation": "Revoke by timestamp: in RequireAuth reject sessions whose IssuedAt is before the user's PasswordChangedAt (already set by Repo.SetPassword and already loaded per request). That is O(1), immediate on all devices, needs no Store interface change or index, and gets a middleware unit test for AC3.",
+      "description": "Risk (from the spec's 4M-session constraint) wants the SCAN replaced, and its natural fix is a per-user index of session IDs maintained in RedisStore.Create/Delete, which changes the login path (out of scope) and every Store implementation, i.e. an even wider change to shared session code. Architecture (from fakeStore in middleware_test.go) wants the shared Store contract left alone, which on its own still leaves an enumerating revocation. Neither fix works with the other's fact.",
+      "lens_a_fix": "Replace SCAN with a per-user Redis set of session IDs (user_sess:{id}) maintained on session create/delete, and delete via that set.",
+      "lens_b_fix": "Do not add a method to the shared session.Store interface; keep revocation local to the reset feature (for example a RedisStore-only method behind a narrow interface in internal/reset).",
+      "reconciliation": "Revoke by timestamp instead of enumerating: RequireAuth (middleware.go) already loads the user on every request via ByID, the user row carries PasswordChangedAt (repo.go, set to now() by SetPassword), and sessions carry IssuedAt (store.go). Reject sessions whose IssuedAt is before PasswordChangedAt. This uses risk's fact (no operation may scale with total sessions) and architecture's fact (Store and its fakes must not change, login untouched): O(1), immediate on all devices, no Store interface change or index, and testable for AC3 with the existing fakes in middleware_test.go.",
       "subtle": true
     },
     {
       "id": "T2",
-      "lenses": ["lens-tests", "lens-architecture"],
-      "related_defects": ["D3", "D4"],
-      "description": "Tests wants automated coverage of AC2 through the mail path. Given the plan's bespoke Mailer that talks to the real relay, the natural fix is an end-to-end test against a relay (staging or a local stub). Architecture wants the bespoke Mailer removed in favour of notify.Sender. Writing integration tests that pin down the bespoke relay mailer, and also deleting it, cannot both be followed; an e2e against a real relay also breaks the no-network test rule.",
-      "lens_a_fix": "Add an automated end-to-end test that sends the reset email through the mailer to a relay and follows the link, including expiry.",
-      "lens_b_fix": "Delete internal/reset/mailer.go and send via the existing notify.Queue/notify.Sender.",
-      "reconciliation": "Send through notify.Sender (enqueued off the request path) and test AC2 in-process with notify.Recorder capturing the message, extracting the token from the link, and an injectable clock to check the 30-minute expiry. No network needed.",
+      "lenses": ["lens-architecture", "lens-consistency"],
+      "related_defects": ["D4", "D6"],
+      "description": "Architecture wants the bespoke Mailer deleted and the reset email sent through the existing notify.Queue. Consistency wants the reset link kept out of logs (spec: the raw token appears only in the emailed link) and naturally fixes it by removing the link from the plan's failure log line. Put together, the shared path is not clean: notify.Queue delivers through relaySender in cmd/authd/handlers.go, which logs m.Data on every successful send, so reusing it writes every reset link (raw token) to the logs.",
+      "lens_a_fix": "Delete internal/reset/mailer.go and enqueue a notify.Message{Template: \"password_reset\", Data: {link}} on the existing notify.Queue.",
+      "lens_b_fix": "Stop logging the reset link on mailer errors; log only the recipient/template, keeping the token only in the email.",
+      "reconciliation": "Reuse notify.Queue (architecture's fact: main.go already wires it with relaySender) and also change relaySender's 'mail relayed' log line to omit Data (log To and Template only), since consistency's fact (the token may appear only in the email) applies to the shared sender, not just the reset code. Neither fix alone is enough: the queue alone leaks every link, the log fix alone keeps a duplicate mailer.",
+      "subtle": true
+    },
+    {
+      "id": "T3",
+      "lenses": ["lens-risk", "lens-spec-coverage"],
+      "related_defects": ["D7", "D8"],
+      "description": "Risk wants the token consumed atomically before the password is set (UPDATE ... SET used_at = now() WHERE token_hash = $1 AND used_at IS NULL AND expires_at > now() RETURNING user_id), closing the Lookup/MarkUsed race. Spec-coverage wants AC5 covered, which the plan's current order (lookup, set, then mark used) satisfies. Consume-first burns the token when SetPassword then returns ErrWeakPassword, so AC5 fails; keeping the current order keeps the race.",
+      "lens_a_fix": "Replace Lookup + MarkUsed with a single atomic conditional Consume called before SetPassword.",
+      "lens_b_fix": "Add a step/test for AC5: confirm with a weak password returns 422, then the same token with a valid password succeeds.",
+      "reconciliation": "Check the policy first with the exported user.ValidatePassword (repo.go) and return 422 without touching the token, then do the atomic conditional Consume (0 rows -> 400 invalid_token), then SetPassword. This needs spec-coverage's fact (AC5 requires the token to survive a policy failure) and risk's fact (consumption must be a single conditional update), and the AC5 test plus a concurrent-confirm test both pass.",
       "subtle": false
     }
   ]

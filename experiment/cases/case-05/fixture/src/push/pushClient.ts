@@ -19,16 +19,21 @@ export class PushClient {
   constructor(
     private readonly gatewayUrl: string,
     private readonly apiKey: string,
-    private readonly timeoutMs = 5000,
+    private readonly timeoutMs: number,
   ) {}
 
   async send(platform: Platform, token: string, payload: PushPayload): Promise<SendResult> {
-    const res = await fetch(`${this.gatewayUrl}/v1/send`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${this.apiKey}`, "content-type": "application/json" },
-      body: JSON.stringify({ platform, token, payload }),
-      signal: AbortSignal.timeout(this.timeoutMs),
-    });
+    let res: Response;
+    try {
+      res = await fetch(`${this.gatewayUrl}/v1/send`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${this.apiKey}`, "content-type": "application/json" },
+        body: JSON.stringify({ platform, token, payload }),
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
+    } catch {
+      return { ok: false, invalidToken: false, retryable: true, status: 0 };
+    }
     if (res.ok) return { ok: true };
     if (res.status === 410 || res.status === 404) return { ok: false, invalidToken: true };
     return { ok: false, invalidToken: false, retryable: res.status >= 500 || res.status === 429, status: res.status };

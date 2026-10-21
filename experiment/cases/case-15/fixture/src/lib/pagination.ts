@@ -1,19 +1,17 @@
+import { config } from "../config";
 import { badRequest } from "./errors";
 
 /** Keyset pagination shared by every list endpoint the app consumes. */
-export const DEFAULT_LIMIT = 20;
-export const MAX_LIMIT = 100;
-
 export interface Cursor {
   createdAt: string;
   id: string;
 }
 
 export function parseLimit(raw: unknown): number {
-  if (raw === undefined) return DEFAULT_LIMIT;
+  if (raw === undefined) return config.paging.defaultLimit;
   const n = Number(raw);
   if (!Number.isInteger(n) || n < 1) throw badRequest("limit must be a positive integer");
-  return Math.min(n, MAX_LIMIT);
+  return Math.min(n, config.paging.maxLimit);
 }
 
 export function encodeCursor(c: Cursor): string {

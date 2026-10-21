@@ -2,8 +2,7 @@ import json
 
 
 def note_to_dict(note: dict) -> dict:
-    """Canonical JSON form of a note. Used by GET /notes/{id}, GET /sync and
-    the push payload builder."""
+    """Canonical JSON form of a note."""
     out = {
         "id": note["id"],
         "title": note["title"],

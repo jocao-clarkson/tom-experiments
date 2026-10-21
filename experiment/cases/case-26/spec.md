@@ -9,7 +9,7 @@ Large tenants page through `GET /v1/invoices` with `offset`, which gets slower t
 - **R1.** `GET /v1/invoices` accepts `cursor` and `limit` (default 25, max 100; out of range returns 400 `invalid_limit`).
 - **R2.** Results are ordered by `created_at` descending, then `id` descending. Paging must neither repeat nor skip an invoice, including when many invoices share a `created_at` (bulk imports write thousands with the same timestamp) and when new invoices are created between page requests.
 - **R3.** Optional filters `status` (`draft|open|paid|void`) and `created_after` (ISO 8601). A cursor is only valid with the filters it was issued for.
-- **R4.** Response shape: `{"data": [...], "next_cursor": string | null}`.
+- **R4.** Response shape: `{"data": [...], "next_cursor": string | null}`. Items in `data` keep today's invoice representation, field for field and format for format (for example `"created_at": "2024-05-01T09:30:00.000Z"`).
 - **R5.** A malformed, tampered, or mismatched cursor (wrong tenant or filters) returns 400 `invalid_cursor`.
 - **R6.** For a 90-day deprecation window, `offset` keeps working as today. Responses to `offset` requests carry `Deprecation: true` and a `Link` header pointing to the migration guide. Sending both `offset` and `cursor` returns 400 `invalid_pagination`.
 
@@ -33,3 +33,4 @@ Large tenants page through `GET /v1/invoices` with `offset`, which gets slower t
 - Total counts or page numbers.
 - Changing `/v1/customers`.
 - Removing `offset` (a later release, after the deprecation window).
+- Changes to CI workflows under `.github/workflows/`; the platform team owns them until the Q3 upgrade.

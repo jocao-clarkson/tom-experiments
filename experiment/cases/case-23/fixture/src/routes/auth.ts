@@ -1,10 +1,9 @@
 import { Router } from "express";
-import { FixedWindowLimiter } from "../lib/rateLimit.js";
+import type { FixedWindowLimiter } from "../lib/rateLimit.js";
 import { AuthError, type AuthService } from "../services/authService.js";
 
-export function authRouter(auth: AuthService): Router {
+export function authRouter(auth: AuthService, loginLimiter: FixedWindowLimiter): Router {
   const r = Router();
-  const loginLimiter = new FixedWindowLimiter(10, 60_000);
 
   r.post("/auth/login", async (req, res, next) => {
     const limit = loginLimiter.hit(`login:${req.ip}`);

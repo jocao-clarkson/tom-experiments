@@ -1,0 +1,49 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: revpipe-orders
+  namespace: finance-batch
+spec:
+  schedule: "15 2 * * *"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: revpipe
+              image: registry.northwind.internal/finance/revpipe:1.4.2
+              args: ["orders"]
+              env:
+                - name: REVPIPE_DSN
+                  valueFrom:
+                    secretKeyRef:
+                      name: revpipe-warehouse
+                      key: dsn
+                - name: REVPIPE_INPUT_DIR
+                  value: /data/in
+                - name: REVPIPE_DEADLETTER_DIR
+                  value: /data/deadletter
+              resources:
+                limits:
+                  memory: 512Mi
+              volumeMounts:
+                - name: provider-exports
+                  mountPath: /data/in
+                  readOnly: true
+                - name: deadletter
+                  mountPath: /data/deadletter
+            - name: log-shipper
+              image: registry.northwind.internal/platform/log-shipper:2.1.0
+              resources:
+                limits:
+                  memory: 512Mi
+          volumes:
+            - name: provider-exports
+              persistentVolumeClaim:
+                claimName: provider-exports
+            - name: deadletter
+              persistentVolumeClaim:
+                claimName: payments-support-share

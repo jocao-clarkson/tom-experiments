@@ -3,7 +3,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from app.core import idempotency, tasks
+from app.core import idempotency
 from app.db.repo import WorkoutRepo
 from app.deps import current_user, get_session
 from app.services import push
@@ -35,12 +35,5 @@ async def create_workout(body: WorkoutIn, request: Request, user=Depends(current
     if key:
         await idempotency.remember(session, user.id, key, 201, result)
     await session.commit()
-    push.send_silent(user.id, {"reason": "workouts_changed"}, exclude_device=x_device_id)
+    await push.send_silent(user.id, {"reason": "workouts_changed"}, exclude_device=x_device_id)
     return result
-
-
-@router.post("/export", status_code=202)
-async def export_workouts(user=Depends(current_user), session=Depends(get_session)):
-    await tasks.enqueue(session, "export.workouts_csv", {"user_id": user.id})
-    await session.commit()
-    return {"status": "queued"}

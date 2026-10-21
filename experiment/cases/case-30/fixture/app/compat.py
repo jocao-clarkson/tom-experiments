@@ -20,6 +20,5 @@ GATED_KEYS: dict[str, tuple[int, int]] = {
 
 
 def shape_for_client(payload: dict, version: tuple[int, int]) -> dict:
-    """Drop keys the calling client is too old to understand. Routes call this
-    on every note they return; serializers stay version-agnostic."""
+    """Drop keys the calling client is too old to understand."""
     return {k: v for k, v in payload.items() if k not in GATED_KEYS or version >= GATED_KEYS[k]}

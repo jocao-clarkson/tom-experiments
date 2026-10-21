@@ -12,7 +12,7 @@ RETRYABLE_STATUS = {500, 502, 503, 504}
 class ResilientClient:
     """Shared client for calls to internal and partner HTTP services."""
 
-    def __init__(self, base_url, api_key, *, timeout=5.0, max_retries=3,
+    def __init__(self, base_url, api_key, *, timeout=5.0, max_retries=0,
                  backoff_base=0.25, session=None):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key

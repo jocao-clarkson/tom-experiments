@@ -27,11 +27,6 @@ type Runner struct {
 	Log       *slog.Logger
 }
 
-var (
-	rowsIngested     = metrics.NewCounter("rows_ingested")
-	rowsDeadLettered = metrics.NewCounter("rows_dead_lettered")
-)
-
 // Run polls until ctx is cancelled. Offsets are committed only after both the
 // good rows and the dead-lettered rows of a batch have been written.
 func (r *Runner) Run(ctx context.Context) error {
@@ -75,8 +70,7 @@ func (r *Runner) processBatch(ctx context.Context, msgs []source.Message) error 
 	if err := r.Src.Commit(ctx, msgs); err != nil {
 		return fmt.Errorf("pipeline %s: commit: %w", r.Cfg.Stream, err)
 	}
-	rowsIngested.Add(r.Cfg.Stream, len(rows))
-	rowsDeadLettered.Add(r.Cfg.Stream, len(rejected))
+	metrics.RecordBatch(r.Cfg.Stream, len(rows), len(rejected))
 	r.Log.Info("batch committed", "stream", r.Cfg.Stream, "rows", len(rows), "rejected", len(rejected))
 	return nil
 }

@@ -2,10 +2,12 @@ You are an impartial judge checking the output of a code-plan review for contrad
 
 You don't see the plan or the code, and you don't know how the findings were produced. Judge only from the findings.
 
-A **contradiction** is a pair of findings **from different lenses** whose recommendations can't both be followed as written: doing one rules out doing the other, or undoes it. These are not contradictions:
+A **contradiction** is a pair of findings **from different lenses** whose recommendations can't both be followed as written: doing one rules out doing the other, or undoes it. This includes two findings that pick **different options for the same decision**: one says use a dict and the other says use flat fields; one says add a lock and the other says take no lock; one says reuse module X and the other says replace X's call with something else. It still counts when some third option could satisfy both, as long as neither finding names it.
+
+These are not contradictions:
 
 - Two findings about different subjects.
-- Two findings that recommend different but compatible changes to the same subject. Both can be done.
+- Two findings that change different parts of the same subject, where both changes can be made together.
 - A finding that mentions another lens's concern and accommodates it.
 - Two findings that agree but word it differently.
 

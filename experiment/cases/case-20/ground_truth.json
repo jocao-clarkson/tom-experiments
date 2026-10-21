@@ -5,42 +5,56 @@
   "defects": [
     {
       "id": "D1",
-      "description": "Plan trusts client_updated_at with no bound. The spec says device clocks can be hours or days off, so a copy stamped in the future wins forever and later legitimate edits from correct devices are reported as stale.",
-      "location": "plan.md step 4 and rollout notes; spec.md R3, non-functional constraints",
-      "expected_lenses": ["lens-risk"],
-      "severity": "major"
-    },
-    {
-      "id": "D2",
-      "description": "Equal client_updated_at timestamps keep the stored copy and report stale; spec R3/AC3 say the incoming copy wins and the result is updated.",
+      "description": "Plan step 4 treats equal client_updated_at timestamps as stale (keeps the stored copy). Spec R3/AC3 say that on equal timestamps with different content the incoming copy wins and the result is updated.",
       "location": "plan.md step 4; spec.md R3, AC3",
       "expected_lenses": ["lens-consistency"],
       "severity": "major"
     },
     {
+      "id": "D2",
+      "description": "The duplicate check compares the incoming item's WorkoutIn fields with the stored row, but WorkoutRepo (_params in fixture/app/db/repo.py) stores distance_m rounded to whole metres. A resent identical item with a fractional distance never equals its stored copy, so with equal timestamps it falls through to stale instead of duplicate, breaking AC1 for most real workouts; the planned fake-repo tests store values verbatim and would not catch it.",
+      "location": "plan.md step 4, test strategy; fixture/app/db/repo.py _params; spec.md AC1",
+      "expected_lenses": ["lens-risk", "lens-tests"],
+      "severity": "major"
+    },
+    {
       "id": "D3",
-      "description": "Plan adds a new sync_notifier with its own httpx.AsyncClient posting to the push gateway, duplicating app/services/push.py (send_silent and the registered push.silent task) and bypassing the durable app/core/tasks queue.",
-      "location": "plan.md step 7; fixture/app/services/push.py; fixture/app/core/tasks.py",
+      "description": "Plan adds app/services/sync_notifier.py with its own httpx.AsyncClient and gateway call, duplicating the existing app/services/push.py send_silent(user_id, data, exclude_device=...) that create_workout already uses for the same workouts_changed push.",
+      "location": "plan.md step 8; fixture/app/services/push.py; fixture/app/api/workouts.py create_workout",
       "expected_lenses": ["lens-architecture"],
       "severity": "major"
     },
     {
       "id": "D4",
-      "description": "The push is fired with asyncio.create_task before commit: it can announce changes that are then rolled back, the task is lost on process restart or gateway outage (no retry), and client retries can trigger extra pushes. AC5 (exactly one push) is not guaranteed.",
-      "location": "plan.md step 7; spec.md R7, AC5, non-functional constraints",
+      "description": "The push is started with asyncio.create_task before the commit: it can announce changes that are then rolled back (step 9 returns 500 and the client retries, pushing again), and the fire-and-forget task is lost on process restart or during a gateway outage with no retry, so AC5's exactly-one push is not guaranteed. The spec's gateway p99 (~3 s) and multi-minute outages mean the push must be durable and off the request path.",
+      "location": "plan.md steps 8-9; spec.md R7, AC5, non-functional constraints",
       "expected_lenses": ["lens-risk"],
       "severity": "major"
     },
     {
       "id": "D5",
-      "description": "R6 (changes since cursor, next_cursor) is deferred; the response omits changes and next_cursor that R4/R6 require.",
-      "location": "plan.md step 6; spec.md R4, R6",
-      "expected_lenses": ["lens-spec-coverage"],
+      "description": "Plan builds a new sync_receipts table and app/db/receipts.py ReceiptRepo for Idempotency-Key replay instead of reusing app/core/idempotency.py (replay_or_none/remember), which create_workout already uses for the same purpose.",
+      "location": "plan.md step 2; fixture/app/core/idempotency.py; fixture/app/api/workouts.py",
+      "expected_lenses": ["lens-architecture"],
       "severity": "major"
     },
     {
       "id": "D6",
-      "description": "No tests for AC4 (201 items -> 413), AC3 (tie -> updated), or AC5 (one push, none to the calling device).",
+      "description": "On an idempotent replay the plan returns stored results but rebuilds changes and next_cursor from current data. Spec R5 requires the retried request to return the original response unchanged.",
+      "location": "plan.md step 2; spec.md R5",
+      "expected_lenses": ["lens-consistency"],
+      "severity": "major"
+    },
+    {
+      "id": "D7",
+      "description": "Plan step 6 drops rows with deleted = true from changes, so deletions never reach the user's other devices. Spec R6 says changes include deletions.",
+      "location": "plan.md step 6; spec.md R6",
+      "expected_lenses": ["lens-spec-coverage", "lens-consistency"],
+      "severity": "major"
+    },
+    {
+      "id": "D8",
+      "description": "Test strategy has no test for AC3 (equal timestamps, different content -> updated), AC4 (201 items -> 413), or AC5 (exactly one push to other devices, none to the calling device identified by X-Device-Id).",
       "location": "plan.md test strategy; spec.md AC3, AC4, AC5",
       "expected_lenses": ["lens-tests"],
       "severity": "minor"
@@ -49,22 +63,32 @@
   "tensions": [
     {
       "id": "T1",
-      "lenses": ["lens-risk", "lens-consistency"],
-      "related_defects": ["D1", "D2"],
-      "description": "Risk's natural fix for untrustworthy device clocks is to order writes by server receipt time instead of client_updated_at. Consistency insists on following R3 exactly (LWW on client_updated_at, incoming wins ties). Switching to server time directly contradicts the spec rule consistency is enforcing.",
-      "lens_a_fix": "Resolve conflicts by server receive time (or ignore client_updated_at) so skewed clocks cannot win.",
-      "lens_b_fix": "Implement R3 as written: compare client_updated_at, and let the incoming copy win on equal timestamps.",
-      "reconciliation": "Keep LWW on client_updated_at with incoming-wins ties per R3, but bound it: reject or clamp timestamps more than a small tolerance in the future relative to server time (e.g. treat them as now), record when clamping happens, and raise the clock-skew limitation with the spec owner rather than silently changing the rule.",
+      "lenses": ["lens-architecture", "lens-risk"],
+      "related_defects": ["D3", "D4"],
+      "description": "Architecture's natural fix is to delete sync_notifier and await push.send_silent after the commit, exactly as create_workout does; push.py itself is a plain async client and looks fine to reuse. Risk's natural fix is to take the push off the request path and make it durable. Awaiting send_silent inline puts the gateway (p99 ~3 s, multi-minute outages, 10 s default PUSH_TIMEOUT_S in settings) on the request path and loses the push when the gateway is down; a bespoke durable notifier contradicts reuse. The hazard is in the spec's non-functional constraints; the reuse pattern and the queue are in the fixture.",
+      "lens_a_fix": "Remove sync_notifier.py and call await push.send_silent(user.id, {\"reason\": \"workouts_changed\"}, exclude_device=x_device_id) after session.commit(), following create_workout.",
+      "lens_b_fix": "Send the push only after the commit, off the request path, with retries that survive gateway outages and restarts (not a fire-and-forget create_task).",
+      "reconciliation": "Register a push task (e.g. \"push.silent\") whose handler calls the existing push.send_silent with exclude_device, and enqueue it with app/core/tasks.enqueue inside the same transaction as the workout writes, once per sync that created or updated something. Needs the architecture-side facts (push.send_silent, and the durable tasks queue in app/core/tasks.py that commits with the caller's session and retries with backoff) and the risk-side fact (gateway latency/outages vs the 1.5 s p95, so the call must not be awaited inline). The idempotent replay returns early, so a retried request does not enqueue a second push.",
       "subtle": false
     },
     {
       "id": "T2",
-      "lenses": ["lens-architecture", "lens-risk"],
-      "related_defects": ["D3", "D4"],
-      "description": "Architecture's natural fix is to drop the bespoke notifier and follow the existing pattern in create_workout, which calls push.send_silent directly after commit. But send_silent is a blocking synchronous httpx call with a 10 s timeout and up to 3 attempts with sleeps; calling it inline in an async handler blocks the event loop and blows the 1.5 s p95, especially given the gateway's p99 and outages. Risk wants the push off the request path and durable. Visible only by reading push.py and tasks.py.",
-      "lens_a_fix": "Delete sync_notifier.py and call push.send_silent(user.id, ..., exclude_device=x_device_id) after commit, as create_workout does.",
-      "lens_b_fix": "Keep the push off the request path and make it reliable (retry, survive restarts, only after commit).",
-      "reconciliation": "Use the existing durable queue: tasks.enqueue(session, \"push.silent\", {...}) inside the same transaction as the workout writes (once per sync that changed data), so it commits atomically, the worker retries with backoff, and the existing push.py handler is reused. Since the idempotency replay returns early, retried requests do not enqueue again.",
+      "lenses": ["lens-consistency", "lens-risk"],
+      "related_defects": ["D1", "D2"],
+      "description": "Consistency's natural fix is R3 as written: equal timestamps with different content -> updated. Risk, seeing that identical resends do not compare equal because WorkoutRepo rounds distance_m, naturally fixes AC1 by treating an equal client_updated_at as duplicate. The risk fix contradicts AC3; the consistency fix alone turns every identical resend (clients retry aggressively) into updated, a rewrite, and a push to every other device. The tie rule is only in the spec; the rounding is only in fixture/app/db/repo.py.",
+      "lens_a_fix": "Change step 4 so equal timestamps with different content report updated and apply the incoming copy (R3, AC3).",
+      "lens_b_fix": "Make resends report duplicate by treating an equal client_updated_at as duplicate instead of comparing content against the rounded stored row.",
+      "reconciliation": "Before the duplicate check, normalise the incoming item the way WorkoutRepo stores it (distance_m rounded to whole metres, same field set), then compare content: identical -> duplicate (AC1); equal timestamps with genuinely different content -> updated (R3/AC3); later -> updated; older -> stale. Needs the rounding in repo._params (risk side) and the R3 incoming-wins tie rule (consistency side); add a test that resends an item with a fractional distance.",
+      "subtle": true
+    },
+    {
+      "id": "T3",
+      "lenses": ["lens-architecture", "lens-consistency"],
+      "related_defects": ["D5", "D6"],
+      "description": "Architecture's natural fix is to drop sync_receipts and reuse app/core/idempotency.py as create_workout does; idempotency.py has no expiry of its own and returns the stored body, which also looks like it settles the replay complaint. But the shared keys are deleted by the maintenance.purge_idempotency_keys task in app/main.py after settings.idempotency_ttl_hours (default 24), while R5 requires replay for 72 hours. Consistency's fix (return the original response within the R5 window) and architecture's plain reuse cannot both hold as written.",
+      "lens_a_fix": "Delete sync_receipts/ReceiptRepo and use idempotency.replay_or_none / idempotency.remember with the full response body, exactly like create_workout.",
+      "lens_b_fix": "On replay return the stored original response unchanged (results, changes and next_cursor), honouring R5's 72-hour window.",
+      "reconciliation": "Reuse app/core/idempotency.py storing the full sync response (so replay is identical), and extend retention to at least 72 hours: raise IDEMPOTENCY_TTL_HOURS / settings.idempotency_ttl_hours to 72 or give the purge task in app/main.py a longer retention for sync keys. Needs the R5 72-hour window (consistency side, spec) and the purge job with its 24-hour default (architecture side, fixture main.py/settings.py, not idempotency.py).",
       "subtle": true
     }
   ]

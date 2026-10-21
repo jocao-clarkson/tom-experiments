@@ -1,9 +1,12 @@
 package api
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/http"
 
+	"github.com/fernway/app-backend/internal/config"
+	"github.com/fernway/app-backend/internal/media"
 	"github.com/fernway/app-backend/internal/storage"
 	"github.com/fernway/app-backend/internal/users"
 )
@@ -15,6 +18,15 @@ type Server struct {
 	Users  *users.Repo
 	Blobs  storage.BlobStore
 	Tokens TokenVerifier
+}
+
+func NewServer(cfg config.Config, db *sql.DB, blobs storage.BlobStore, tokens TokenVerifier) *Server {
+	media.MaxPixels = cfg.MaxImagePixels
+	return &Server{
+		Users:  &users.Repo{DB: db},
+		Blobs:  blobs,
+		Tokens: tokens,
+	}
 }
 
 func (s *Server) Routes() http.Handler {

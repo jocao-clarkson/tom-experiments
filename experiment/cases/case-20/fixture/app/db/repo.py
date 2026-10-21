@@ -3,6 +3,15 @@ from datetime import datetime
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+_FIELDS = ("kind", "started_at", "duration_s", "distance_m", "client_updated_at", "deleted")
+
+
+def _params(w: dict) -> dict:
+    p = {k: w.get(k) for k in _FIELDS}
+    if p["distance_m"] is not None:
+        p["distance_m"] = round(p["distance_m"])
+    return p
+
 
 class WorkoutRepo:
     def __init__(self, session: AsyncSession):
@@ -21,7 +30,7 @@ class WorkoutRepo:
                  "client_updated_at, deleted, server_updated_at) "
                  "VALUES (:u, :client_id, :kind, :started_at, :duration_s, :distance_m, "
                  ":client_updated_at, :deleted, now()) RETURNING id"),
-            {"u": user_id, **w},
+            {"u": user_id, "client_id": w["client_id"], **_params(w)},
         )).scalar_one()
 
     async def update(self, workout_id: str, w: dict) -> None:
@@ -29,7 +38,7 @@ class WorkoutRepo:
             text("UPDATE workouts SET kind = :kind, started_at = :started_at, duration_s = :duration_s, "
                  "distance_m = :distance_m, client_updated_at = :client_updated_at, deleted = :deleted, "
                  "server_updated_at = now() WHERE id = :id"),
-            {"id": workout_id, **w},
+            {"id": workout_id, **_params(w)},
         )
 
     async def changed_since(self, user_id: str, since: datetime, limit: int = 500) -> list[dict]:

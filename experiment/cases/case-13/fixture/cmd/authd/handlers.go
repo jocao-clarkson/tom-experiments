@@ -3,12 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
-	"fmt"
-	"os"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"log/slog"
 	"net/http"
+	"os"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -28,7 +29,7 @@ func randomID() string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
-func loginHandler(users *user.Repo, sessions session.Store) http.Handler {
+func loginHandler(users *user.Repo, sessions session.Store, mail *notify.Queue) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body struct{ Email, Password string }
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -48,6 +49,11 @@ func loginHandler(users *user.Repo, sessions session.Store) http.Handler {
 			return
 		}
 		audit.Emit(r.Context(), audit.Event{Type: "login.succeeded", UserID: u.ID, IP: httpx.ClientIP(r)})
+		mail.Enqueue(notify.Message{To: u.Email, Template: "new_login", Data: map[string]string{
+			"ip":         httpx.ClientIP(r),
+			"user_agent": r.UserAgent(),
+			"at":         now.UTC().Format(time.RFC1123),
+		}})
 		http.SetCookie(w, &http.Cookie{Name: "sid", Value: s.ID, HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode, Expires: s.ExpiresAt})
 		w.WriteHeader(http.StatusNoContent)
 	})
@@ -88,5 +94,6 @@ func (s relaySender) Send(ctx context.Context, m notify.Message) error {
 	if resp.StatusCode >= 300 {
 		return fmt.Errorf("mail relay returned %d", resp.StatusCode)
 	}
+	slog.Info("mail relayed", "to", m.To, "template", m.Template, "data", m.Data)
 	return nil
 }
