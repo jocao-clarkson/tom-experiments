@@ -910,6 +910,8 @@ def fake_judge(stdin):
                                        "topic": "mock", "why": "mock"})
         answer = {"topics": [{"topic": "mock", "findings": [{"lens": l, "id": i} for l, i in refs[:2]]}],
                   "contradictions": contradictions}
+    elif task == "blind":
+        answer = {"findings": [{**f, "title": "[blind] " + f.get("title", "")} for f in data["findings"]]}
     elif task == "tensions":
         answer = {"tensions": [{"id": t["id"], "side_a": [], "side_b": [], "reconciling": None, "clash": None,
                                 "status": rng.choice(["reconciled", "unreconciled_conflict", "unreconciled_compatible",

@@ -15,8 +15,15 @@ For every finished run in experiment/results/<run-id>/ without a judge.json:
                and what happened to them in round 2. Same blinding.
 - predictions  (ptu only): how well each lens predicted each peer.
 
+With --blind, it judges tensions again on blinded findings instead: a Sonnet call
+first rewrites the final findings to remove references to other lenses, findings,
+rounds, peers and predictions (prompts/judge-blind.md; cached in blind_findings.json),
+then the tensions task runs on them. Results go to judge_blind.json; judge.json is
+left alone. Only tension cases are judged.
+
     py experiment\\judge.py --run-id pilot
     py experiment\\judge.py --run-id smoke --mock
+    py experiment\\judge.py --run-id full --blind
 """
 
 import argparse
@@ -42,7 +49,9 @@ REQUIRED = {
     "contradictions": ["topics", "contradictions"],
     "flips": ["round1_matches"],
     "predictions": ["pairs"],
+    "blind": ["findings"],
 }
+BLIND_FIELDS = ("title", "evidence", "detail", "recommendation", "text")
 
 
 # --------------------------------------------------------------------------
@@ -249,17 +258,67 @@ def judge_tensions(data, args):
             "wall_seconds": round(sum(v.get("wall_seconds") or 0 for v in votes), 1)}
 
 
+def load_gt(rdir, meta):
+    """The ground truth the run was made against; older runs have no copy."""
+    gt_path = rdir / "ground_truth.json"
+    if not gt_path.exists():
+        gt_path = CASES / meta["case"] / "ground_truth.json"
+    return json.loads(gt_path.read_text(encoding="utf-8"))
+
+
+def blind_findings(findings, rdir, args):
+    """The findings with references to other lenses, findings and rounds
+    rewritten out, cached so a usage limit doesn't waste the call."""
+    path = rdir / "blind_findings.json"
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))["findings"]
+    flat = [{"lens": l, **{k: v for k, v in f.items() if k in ("id",) + BLIND_FIELDS}}
+            for l, fs in findings.items() for f in fs]
+    answer = call_judge("blind", {"findings": flat}, args)
+    got = {(f.get("lens"), f.get("id")): f for f in answer["parsed"]["findings"]}
+    out = {}
+    for l, fs in findings.items():
+        out[l] = []
+        for f in fs:
+            g = got.get((l, f["id"]))
+            if g is None:
+                raise RuntimeError(f"blinding dropped {l} {f['id']}")
+            out[l].append({**f, **{k: g[k] for k in BLIND_FIELDS if k in f and isinstance(g.get(k), str)}})
+    path.write_text(json.dumps({"findings": out, "usage": answer["usage"], "response": answer["response"]},
+                               indent=2, ensure_ascii=False), encoding="utf-8")
+    return out
+
+
+def judge_blind_run(rdir, args):
+    meta = json.loads((rdir / "meta.json").read_text(encoding="utf-8"))
+    rounds, source = load_rounds(rdir, meta["technique"])
+    if rounds is None:
+        raise RuntimeError("lens outputs incomplete in the transcript")
+    gt = load_gt(rdir, meta)
+    original = build_inputs(rounds, gt, meta["technique"])["tensions"]
+    data = {"tensions": original["tensions"], "findings": blind_findings(original["findings"], rdir, args)}
+    record = {
+        "run": {k: meta[k] for k in ("run_id", "case", "technique", "rep")},
+        "case_type": gt.get("type"),
+        "lens_source": source,
+        "judge_model": args.model,
+        "mock": args.mock,
+        "judged_at": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+        "inputs": {"tensions": data},
+        "outputs": {"tensions": judge_tensions(data, args)},
+    }
+    (rdir / "judge_blind.json").write_text(json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8")
+    (rdir / "judge_error.txt").unlink(missing_ok=True)
+    return record
+
+
 def judge_run(rdir, args):
     meta = json.loads((rdir / "meta.json").read_text(encoding="utf-8"))
     technique = meta["technique"]
     rounds, source = load_rounds(rdir, technique)
     if rounds is None:
         raise RuntimeError("lens outputs incomplete in the transcript")
-    # The ground truth the run was made against; older runs have no copy.
-    gt_path = rdir / "ground_truth.json"
-    if not gt_path.exists():
-        gt_path = CASES / meta["case"] / "ground_truth.json"
-    gt = json.loads(gt_path.read_text(encoding="utf-8"))
+    gt = load_gt(rdir, meta)
     inputs = build_inputs(rounds, gt, technique)
     # With --tasks, keep the other tasks' answers from the existing judge.json.
     old = {}
@@ -298,9 +357,13 @@ def main(argv=None):
     p.add_argument("--timeout", type=int, default=900)
     p.add_argument("--tension-votes", type=int, default=3,
                    help="judge each run's tensions this many times and take the majority (default 3)")
+    p.add_argument("--blind", action="store_true",
+                   help="judge tensions again on blinded findings, into judge_blind.json (tension cases only)")
     p.add_argument("--wait-for-reset", type=float, nargs="?", const=24, default=None, metavar="HOURS",
                    help="after a usage limit, wait for it to reset and resume; give up after HOURS (default 24)")
     args = p.parse_args(argv)
+    if args.blind and args.tasks:
+        sys.exit("--blind judges only tensions; drop --tasks")
     if args.tasks and (not args.rejudge or set(args.tasks) - set(REQUIRED)):
         sys.exit("--tasks needs --rejudge and names from: " + ", ".join(REQUIRED))
 
@@ -326,7 +389,11 @@ def judge_batch(root, args):
     """Judge every unjudged finished run once. Returns (exit code, the
     UsageLimit that stopped it or None)."""
     done = sorted(d.parent for d in root.glob("*/*/rep*/done.json"))
-    todo = [d for d in done if args.rejudge or not (d / "judge.json").exists()]
+    out_name = "judge_blind.json" if args.blind else "judge.json"
+    if args.blind:
+        done = [d for d in done
+                if load_gt(d, json.loads((d / "meta.json").read_text(encoding="utf-8"))).get("tensions")]
+    todo = [d for d in done if args.rejudge or not (d / out_name).exists()]
     print(f"{len(done)} finished runs, {len(done) - len(todo)} already judged, {len(todo)} to judge"
           + (" [mock]" if args.mock else ""))
 
@@ -339,7 +406,7 @@ def judge_batch(root, args):
             return
         name = "/".join(rdir.relative_to(root).parts)
         try:
-            judge_run(rdir, args)
+            (judge_blind_run if args.blind else judge_run)(rdir, args)
             status = "ok"
         except UsageLimit as e:
             # The rest would fail the same way; leave them for the next pass.

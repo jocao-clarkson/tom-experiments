@@ -180,6 +180,7 @@ The judge runs as separate `claude -p --model sonnet` sessions in an empty folde
 - **contradictions** (every run) sees only the final findings, without even the ground truth. It groups findings by what their recommendation changes, then checks cross-lens pairs within each group.
 - **flips** (C1, D, PTU) sees the round-1 and round-2 findings, with the same blinding.
 - **predictions** (PTU only) sees the predictions and the peers' round-1 findings. It can't be blinded, because the predictions are PTU's own output.
+- **blinded tensions** (`judge.py --blind`, tension cases) re-judges tensions after a Sonnet call rewrites the final findings to drop references to other lenses' findings, peers, rounds, predictions and debate, keeping the technical content (`prompts/judge-blind.md`). All four techniques are rewritten the same way, baseline included. The rewrite is cached in `blind_findings.json` and the statuses go to `judge_blind.json`; `judge.json` is untouched. `analyze.py summary --run-id full --blind` scores tensions from it into `analysis-blind/`, plus `blind_agreement.csv`, which compares each tension's blinded and original status. It exists because round-2 findings revealed their technique (see the qualitative notes). On one PTU run, it cut findings with such references from 35 of 47 to 4, and those 4 only cite the same lens's other findings, as baseline findings also do.
 
 ### Primary metric: tension reconciliation
 

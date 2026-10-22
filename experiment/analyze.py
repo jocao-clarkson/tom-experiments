@@ -85,9 +85,13 @@ def mean(values):
     return statistics.fmean(vals) if vals else None
 
 
-def run_metrics(rdir):
+def run_metrics(rdir, blind=False):
     meta = json.loads((rdir / "meta.json").read_text(encoding="utf-8"))
     judged = json.loads((rdir / "judge.json").read_text(encoding="utf-8"))
+    if blind and (rdir / "judge_blind.json").exists():
+        # Tension statuses from the blinded re-judge; everything else as judged.
+        blind_judged = json.loads((rdir / "judge_blind.json").read_text(encoding="utf-8"))
+        judged["outputs"]["tensions"] = blind_judged["outputs"]["tensions"]
     final_in = judged["inputs"]["final"]
     final_out = judged["outputs"]["final"]["parsed"]
 
@@ -197,7 +201,7 @@ def contradiction_pairs(final_out, refs):
     return pairs
 
 
-def load(run_id):
+def load(run_id, blind=False):
     root = RESULTS / run_id / "runs"
     if not root.exists():
         sys.exit(f"no results for run-id {run_id!r}")
@@ -209,7 +213,11 @@ def load(run_id):
             continue
         if not (rdir / "judge.json").exists():
             continue
-        row, pred_rows, _ = run_metrics(rdir)
+        if blind and (rdir / "ground_truth.json").exists() and not (rdir / "judge_blind.json").exists():
+            gt = json.loads((rdir / "ground_truth.json").read_text(encoding="utf-8"))
+            if gt.get("tensions"):
+                sys.exit(f"{rdir} has no judge_blind.json yet; run judge.py --blind first")
+        row, pred_rows, _ = run_metrics(rdir, blind)
         rows.append(row)
         for p in pred_rows:
             preds.append({**{k: row[k] for k in ("case", "rep")}, **p})
@@ -307,11 +315,39 @@ def fmt(v):
     return f"{v:.4f}".rstrip("0").rstrip(".") if isinstance(v, float) else ("" if v is None else v)
 
 
+def blind_agreement(run_id):
+    """Per technique, how often the blinded re-judge gave each tension the same
+    status as the original judge."""
+    by_tech = {}
+    for bpath in sorted((RESULTS / run_id / "runs").glob("*/*/rep*/judge_blind.json")):
+        blind = json.loads(bpath.read_text(encoding="utf-8"))
+        orig = json.loads((bpath.parent / "judge.json").read_text(encoding="utf-8"))
+        a = {t.get("id"): t.get("status") for t in tensions_output(orig)["tensions"]}
+        b = {t.get("id"): t.get("status") for t in blind["outputs"]["tensions"]["parsed"]["tensions"]}
+        s = by_tech.setdefault(blind["run"]["technique"], {"technique": blind["run"]["technique"], "n": 0,
+                                                            "same_status": 0, "same_reconciled": 0,
+                                                            "gained_reconciled": 0, "lost_reconciled": 0})
+        for tid in a.keys() & b.keys():
+            s["n"] += 1
+            s["same_status"] += a[tid] == b[tid]
+            s["same_reconciled"] += (a[tid] == "reconciled") == (b[tid] == "reconciled")
+            s["gained_reconciled"] += a[tid] != "reconciled" and b[tid] == "reconciled"
+            s["lost_reconciled"] += a[tid] == "reconciled" and b[tid] != "reconciled"
+    return [by_tech[t] for t in TECHNIQUES if t in by_tech]
+
+
 def cmd_summary(args):
-    rows, preds, failed = load(args.run_id)
+    rows, preds, failed = load(args.run_id, args.blind)
     if not rows:
         sys.exit("no judged runs yet; run judge.py first")
-    out = RESULTS / args.run_id / "analysis"
+    out = RESULTS / args.run_id / ("analysis-blind" if args.blind else "analysis")
+    if args.blind:
+        agreement = blind_agreement(args.run_id)
+        write_csv(out / "blind_agreement.csv", agreement)
+        print("blinded vs original tension statuses:")
+        print_table(agreement, ["technique", "n", "same_status", "same_reconciled", "gained_reconciled",
+                                "lost_reconciled"])
+        print()
     write_csv(out / "runs.csv", rows)
 
     summary = []
@@ -587,6 +623,8 @@ def main(argv=None):
     sub = p.add_subparsers(dest="command", required=True)
     s = sub.add_parser("summary", help="write runs, summary, comparisons and predictions CSVs")
     s.add_argument("--run-id", required=True)
+    s.add_argument("--blind", action="store_true",
+                   help="use tension statuses from judge.py --blind; writes to analysis-blind/")
     l = sub.add_parser("labels", help="export a random sample of judged pairs for human labelling")
     l.add_argument("--run-id", required=True)
     l.add_argument("--n", type=int, help="items to sample (default 60 pairs, or 40 tensions)")
