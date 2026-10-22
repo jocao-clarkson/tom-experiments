@@ -97,6 +97,47 @@ py experiment\run.py --run-id full --cases all --workers 1 --wait-for-reset 72 &
 
 `--workers 2` runs two orchestrators at once, and each starts five lenses in parallel, so up to 10 Sonnet subagents run at a time. Use `--workers 1` if you hit limits quickly.
 
+## Results: run `full`, rep 1
+
+120 runs (30 cases x 4 techniques), all judged, none failed. Tensions were judged with majority-of-3. Tension metrics cover the 24 tension cases. Comparisons are paired by case, with a bootstrap 95% CI and a sign-flip p (see [Metrics](#metrics)). The CSVs are in `results/full/analysis/`, which is git-ignored.
+
+| Technique | `tension_resolved_rate` | `tension_clash_rate` | `contradictions` | `recall` | `precision` | `n_findings` | `words_per_finding` | `tokens_total` |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `baseline` | 0.465 | 0.132 | 1.87 | 0.990 | 0.548 | 39.8 | 124 | 548k |
+| `second-round` | **0.618** | 0.035 | 0.47 | 0.995 | 0.531 | 44.6 | 121 | 1,053k |
+| `debate` | 0.604 | 0.063 | 0.50 | 0.995 | 0.548 | 40.6 | 112 | 1,051k |
+| `ptu` | 0.590 | **0.000** | **0.13** | 0.990 | 0.516 | 46.3 | 124 | 1,148k |
+
+Primary metric, paired differences:
+
+| Comparison | Diff | 95% CI | p |
+| --- | --- | --- | --- |
+| `second-round` − `baseline` | +0.153 | [+0.056, +0.264] | 0.019 |
+| `debate` − `baseline` | +0.139 | [+0.056, +0.222] | 0.008 |
+| `ptu` − `baseline` | +0.125 | [+0.014, +0.250] | 0.093 |
+| `ptu` − `debate` | −0.014 | [−0.097, +0.083] | 1.0 |
+| `ptu` − `second-round` | −0.028 | [−0.125, +0.056] | 0.77 |
+| `debate` − `second-round` | −0.014 | [−0.083, +0.056] | 1.0 |
+
+What it shows:
+
+- **A second round helps, and the format of that round doesn't detectably matter.** All three two-round techniques reconcile 12–15 points more tensions than `baseline`. PTU, debate and plain second-round can't be told apart: the PTU vs debate CI spans about ±9 points. Most of the gain seems to come from lenses reading each other's round-1 findings.
+- **PTU never left a clash.** `tension_clash_rate` was 0 for PTU, against 0.063 for debate (diff −0.063, CI [−0.125, −0.014], p = 0.12) and 0.132 for `baseline` (p = 0.007). PTU also had the fewest contradictions (0.13 per run vs 0.50 for debate, p = 0.08). The direction is consistent, but the p-values from one rep fall short of firm.
+- **PTU's guardrails are slightly worse.** Compared with debate, PTU has lower precision (−0.032, p = 0.01), about 6 more findings per run (p < 0.001) that are 12 words longer each, about 9% more tokens (p = 0.01), and 73 s more wall time per run. Debate has the shortest findings of any arm.
+- **Recall is at the ceiling** (0.99–0.995 for every arm), so defect detection doesn't separate the techniques.
+- **PTU predictions:** a lens predicted about 46% of each peer's round-1 findings (`pred_recall` 0.463), and over 80% of its predictions came true. Architecture and consistency findings were the hardest to predict (35–40%), and tests findings the easiest (about 58–63%).
+
+Caveats specific to this run:
+
+- **One rep and 24 tension cases.** Differences of a few points are within noise.
+- **The primary metric was chosen after the pilot** (see [Primary metric](#primary-metric-tension-reconciliation)).
+- **The tension-case baselines came from calibration** (see the reuse note above).
+- **For `ptu` − `baseline`, the CI excludes 0 but p = 0.09.** The bootstrap and the permutation test disagree at the margin, so treat that effect as suggestive.
+- **One stray prediction row.** One PTU run has a single lens-consistency prediction about itself (n = 1 in `predictions.csv`). It doesn't affect the per-run metrics.
+- **One slow outlier.** `case-06/debate` took 847 s against a typical 70–90 s, but finished normally.
+
+Cost: the 126 orchestrator sessions took four 5-hour usage windows on a Max plan, and the judging (about 7 Sonnet calls per run) took about three more. Before adding reps, weigh that cost against the size of the gap you're trying to resolve. At ±9 points, three reps are unlikely to separate PTU from debate on the primary metric. They would firm up the clash-rate difference. A human check of judge labels (`analyze.py labels` / `kappa`) costs no usage.
+
 ## Usage per run
 
 With shared round 1 (the default):
