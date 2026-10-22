@@ -129,12 +129,19 @@ What it shows:
 - **Recall is at the ceiling** (0.99–0.995 for every arm), so defect detection doesn't separate the techniques.
 - **PTU predictions:** a lens predicted about 46% of each peer's round-1 findings (`pred_recall` 0.463), and over 80% of its predictions came true. Architecture and consistency findings were the hardest to predict (35–40%), and tests findings the easiest (about 58–63%).
 
+Qualitative read ([notes/full-rep1-qualitative.md](notes/full-rep1-qualitative.md)):
+
+- **The round-2 differences look like noise.** 28 of 70 tensions are reconciled by all four techniques and 19 by none. The round-2 techniques each win only 2–7 tensions the others miss, scattered across cases and lens pairs. Round 2 helps most where architecture is one side of the tension. Risk+tests tensions are never reconciled by any technique.
+- **Second-round and debate share a mechanism.** A lens that held a conflicting fix sees the peer's finding and adopts it. Debate rarely changes minds: its stances are 311 "defend" to 45 "concede", and the debate block isn't judged.
+- **PTU avoids clashes by writing peer-aware findings, mostly without reconciling.** Of the 11 tensions where baseline or debate clashed, PTU reconciled 6 and left 5 compatible. Its conflict predictions didn't single out those tensions (they came true in 4 of 11, against 33 of 59 elsewhere). Instead, 54% of PTU's final findings cite another lens's finding, against about 20% for second-round and debate. PTU findings carry the peer's caveat, so they can't clash, but they often don't commit to the full fix. PTU also lost 3 tensions that baseline had reconciled, against 1 each for the others, because it spread the needed facts across findings that cross-reference each other.
 Caveats specific to this run:
 
 - **One rep and 24 tension cases.** Differences of a few points are within noise.
 - **The primary metric was chosen after the pilot** (see [Primary metric](#primary-metric-tension-reconciliation)).
 - **The tension-case baselines came from calibration** (see the reuse note above).
 - **For `ptu` − `baseline`, the CI excludes 0 but p = 0.09 (Holm 0.37).** The bootstrap and the permutation test disagree at the margin, so treat that effect as suggestive.
+- **The judge isn't blind to technique in practice.** Round-2 findings cite peers and round 1 ("Four lenses independently flagged this", "My round-1 claim ... was wrong"), and PTU does so most. Baseline findings never do. Whether this biased the judge is unknown. A blinded re-judge would strip these references first.
+- **Judge noise is the same size as the round-2 gaps.** 6–12 tensions per technique were decided 2–1, and near-identical findings sometimes got different statuses (case-25 T3).
 - **The judge hasn't been checked against a human on tensions yet.** See [Checking the judge against a human](#checking-the-judge-against-a-human).
 - **One stray prediction row.** One PTU run has a single lens-consistency prediction about itself (n = 1 in `predictions.csv`). It doesn't affect the per-run metrics.
 - **One slow outlier.** `case-06/debate` took 847 s against a typical 70–90 s, but finished normally.
