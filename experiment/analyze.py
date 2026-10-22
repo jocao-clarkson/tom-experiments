@@ -3,6 +3,7 @@
     py experiment\\analyze.py summary --run-id pilot
     py experiment\\analyze.py labels  --run-id pilot --n 60
     py experiment\\analyze.py kappa   --run-id pilot
+    py experiment\\analyze.py labels  --run-id full --task tensions   (then kappa --task tensions)
 
 Outputs go to experiment/results/<run-id>/analysis/:
   runs.csv          one row per judged run
@@ -12,6 +13,8 @@ Outputs go to experiment/results/<run-id>/analysis/:
   labels.csv        pairs for a human to label (labels command; never filled in here)
   labels_key.csv    what each label row is and what the judge said (keep it closed while labelling)
   kappa.json        judge-vs-human agreement (kappa command)
+  tension_labels.csv, tension_labels_key.csv, tension_items/, tension_kappa.json
+                    the same for tension statuses (--task tensions)
 """
 
 import argparse
@@ -272,7 +275,18 @@ def comparisons(rows):
                     "p_sign_flip": p,
                 })
             out.append(row)
+    # Holm correction within each metric, across the comparisons.
+    for metric in COMPARE_METRICS:
+        holm(r for r in out if r["metric"] == metric and "p_sign_flip" in r)
     return out
+
+
+def holm(rows):
+    rows = sorted(rows, key=lambda r: r["p_sign_flip"])
+    running = 0.0
+    for i, r in enumerate(rows):
+        running = max(running, min(1.0, (len(rows) - i) * r["p_sign_flip"]))
+        r["p_holm"] = running
 
 
 # --------------------------------------------------------------------------
@@ -317,7 +331,7 @@ def cmd_summary(args):
     write_csv(out / "summary.csv", summary)
     write_csv(out / "comparisons.csv", comparisons(rows),
               ["a", "b", "metric", "n_cases", "mean_a", "mean_b", "mean_diff_a_minus_b",
-               "ci95_low", "ci95_high", "p_sign_flip"])
+               "ci95_low", "ci95_high", "p_sign_flip", "p_holm"])
 
     if preds:
         agg = {}
@@ -354,7 +368,13 @@ def finding_text(f):
     return " | ".join(p for p in parts if p)
 
 
+TENSION_STATUSES = ["reconciled", "unreconciled_conflict", "unreconciled_compatible", "one_side_only", "neither"]
+
+
 def cmd_labels(args):
+    if args.task == "tensions":
+        return tension_labels(args)
+    args.n = args.n or 60
     out = RESULTS / args.run_id / "analysis"
     labels_path = out / "labels.csv"
     if labels_path.exists() and not args.force:
@@ -397,7 +417,147 @@ def cmd_labels(args):
     print("Don't open labels_key.csv until you're done; it shows the judge's answers.")
 
 
+def tension_labels(args):
+    """Sample (run, tension) items for a human to give a status, stratified by
+    technique and by whether the judge called the tension reconciled."""
+    out = RESULTS / args.run_id / "analysis"
+    labels_path = out / "tension_labels.csv"
+    args.n = args.n or 40
+    if labels_path.exists() and not args.force:
+        sys.exit(f"{labels_path} already exists (it may hold your labels). Use --force to overwrite.")
+    root = RESULTS / args.run_id / "runs"
+    pools = {}
+    for jpath in sorted(root.glob("*/*/rep*/judge.json")):
+        if not (jpath.parent / "done.json").exists():
+            continue
+        judged = json.loads(jpath.read_text(encoding="utf-8"))
+        if "tensions" not in judged["outputs"]:
+            continue
+        status = {t.get("id"): t.get("status") for t in judged["outputs"]["tensions"]["parsed"]["tensions"]}
+        for t in judged["inputs"]["tensions"]["tensions"]:
+            if t["id"] in status:
+                key = (judged["run"]["technique"], status[t["id"]] == "reconciled")
+                pools.setdefault(key, []).append((judged, t, status[t["id"]]))
+
+    rng = random.Random(args.seed)
+    techniques = sorted({k[0] for k in pools})
+    per_technique = args.n // len(techniques)
+    sample = []
+    for tech in techniques:
+        rec, unrec = pools.get((tech, True), []), pools.get((tech, False), [])
+        n_rec = min(len(rec), per_technique // 2)
+        n_unrec = min(len(unrec), per_technique - n_rec)
+        sample += rng.sample(rec, n_rec) + rng.sample(unrec, n_unrec)
+    rng.shuffle(sample)
+
+    items_dir = out / "tension_items"
+    items_dir.mkdir(parents=True, exist_ok=True)
+    for old in items_dir.glob("*.md"):
+        old.unlink()
+    label_rows, key_rows = [], []
+    for i, (judged, t, status) in enumerate(sample, 1):
+        lid = f"T{i:03d}"
+        (items_dir / f"{lid}.md").write_text(tension_item_md(lid, t, judged), encoding="utf-8")
+        label_rows.append({"label_id": lid, "item_file": f"tension_items/{lid}.md",
+                           "human_status": "", "human_reconciling": "", "notes": ""})
+        key_rows.append({"label_id": lid, **judged["run"], "tension": t["id"], "judge_status": status})
+    write_csv(labels_path, label_rows, ["label_id", "item_file", "human_status", "human_reconciling", "notes"])
+    write_csv(out / "tension_labels_key.csv", key_rows,
+              ["label_id", "run_id", "case", "technique", "rep", "tension", "judge_status"])
+    print(f"wrote {len(label_rows)} tension items to {labels_path} (one file each in {items_dir})")
+    print("For each item, read its file and fill human_status with one of: " + ", ".join(TENSION_STATUSES))
+    print("Don't open tension_labels_key.csv until you're done; it shows the judge's answers.")
+
+
+def tension_item_md(lid, t, judged):
+    lines = [
+        f"# {lid}",
+        "",
+        "Give this tension one status (definitions at the bottom). Judge only from the findings below.",
+        "",
+        "## Tension",
+        "",
+        f"Lenses: {', '.join(t.get('lenses', []))}",
+        "",
+        t.get("description", ""),
+        "",
+        f"**Fix lens A would recommend:** {t.get('lens_a_fix', '')}",
+        "",
+        f"**Fix lens B would recommend:** {t.get('lens_b_fix', '')}",
+        "",
+        f"**Reconciled fix that satisfies both:** {t.get('reconciliation', '')}",
+        "",
+        "## Final findings",
+        "",
+    ]
+    for lens, fs in judged["inputs"]["tensions"]["findings"].items():
+        lines += [f"### {lens}", ""]
+        for f in fs:
+            lines += [f"- **{f.get('id')}** {finding_text(f)}", ""]
+    # Same definitions the judge gets (prompts/judge-tensions.md).
+    lines += [
+        "## Statuses",
+        "",
+        "- `reconciled`: one finding on its own names both concerns, recommends a fix satisfying both "
+        "(the substance of the reconciled fix, or an explicit trade-off with a reason), and relies on the "
+        "fact the reconciliation needs; and no other finding still recommends a side's fix in a way that "
+        "rules it out. Never build it out of two findings.",
+        "- `unreconciled_conflict`: both sides are raised, and their recommendations clash, or a finding "
+        "clashes with the reconciling one.",
+        "- `unreconciled_compatible`: both sides are raised and could both be followed, but no single "
+        "finding reconciles them.",
+        "- `one_side_only`: only one side's concern appears.",
+        "- `neither`: neither side appears.",
+        "",
+        "Put the reconciling finding's id in `human_reconciling` if there is one.",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def kappa_stats(pairs):
+    """Percent agreement and Cohen's kappa for (human, judge) label pairs."""
+    n = len(pairs)
+    agree = sum(1 for h, j in pairs if h == j) / n
+    cats = {x for p in pairs for x in p}
+    expected = sum((sum(h == c for h, _ in pairs) / n) * (sum(j == c for _, j in pairs) / n) for c in cats)
+    kappa = (agree - expected) / (1 - expected) if expected < 1 else None
+    return agree, kappa
+
+
+def tension_kappa(args):
+    out = RESULTS / args.run_id / "analysis"
+    with (out / "tension_labels.csv").open(encoding="utf-8-sig", newline="") as f:
+        human = {r["label_id"]: r["human_status"].strip().lower() for r in csv.DictReader(f)}
+    with (out / "tension_labels_key.csv").open(encoding="utf-8", newline="") as f:
+        key = {r["label_id"]: r for r in csv.DictReader(f)}
+    pairs = [(h, key[lid]["judge_status"]) for lid, h in human.items() if h in TENSION_STATUSES and lid in key]
+    if not pairs:
+        sys.exit("no human labels filled in yet (human_status must be one of: " + ", ".join(TENSION_STATUSES) + ")")
+    agree, kappa = kappa_stats(pairs)
+    bin_agree, bin_kappa = kappa_stats([(h == "reconciled", j == "reconciled") for h, j in pairs])
+    by_tech = {}
+    for lid, h in human.items():
+        if h in TENSION_STATUSES and lid in key:
+            by_tech.setdefault(key[lid]["technique"], []).append((h == "reconciled") == (key[lid]["judge_status"] == "reconciled"))
+    result = {
+        "n_labelled": len(pairs),
+        "n_unlabelled": len(human) - len(pairs),
+        "status_agreement": agree,
+        "status_kappa": kappa,
+        "reconciled_agreement": bin_agree,
+        "reconciled_kappa": bin_kappa,
+        "reconciled_agreement_by_technique": {t: sum(v) / len(v) for t, v in sorted(by_tech.items())},
+        "confusion": {f"human_{h}__judge_{j}": sum(1 for p in pairs if p == (h, j))
+                      for h in TENSION_STATUSES for j in TENSION_STATUSES if (h, j) in set(pairs)},
+    }
+    (out / "tension_kappa.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+    print(json.dumps(result, indent=2))
+
+
 def cmd_kappa(args):
+    if args.task == "tensions":
+        return tension_kappa(args)
     out = RESULTS / args.run_id / "analysis"
     with (out / "labels.csv").open(encoding="utf-8-sig", newline="") as f:
         human = {r["label_id"]: r["human_label"].strip().lower() for r in csv.DictReader(f)}
@@ -429,11 +589,13 @@ def main(argv=None):
     s.add_argument("--run-id", required=True)
     l = sub.add_parser("labels", help="export a random sample of judged pairs for human labelling")
     l.add_argument("--run-id", required=True)
-    l.add_argument("--n", type=int, default=60)
+    l.add_argument("--n", type=int, help="items to sample (default 60 pairs, or 40 tensions)")
     l.add_argument("--seed", type=int, default=1)
-    l.add_argument("--force", action="store_true", help="overwrite an existing labels.csv")
-    k = sub.add_parser("kappa", help="judge-vs-human agreement from your filled-in labels.csv")
+    l.add_argument("--force", action="store_true", help="overwrite an existing labels file")
+    l.add_argument("--task", choices=["contradictions", "tensions"], default="contradictions")
+    k = sub.add_parser("kappa", help="judge-vs-human agreement from your filled-in labels")
     k.add_argument("--run-id", required=True)
+    k.add_argument("--task", choices=["contradictions", "tensions"], default="contradictions")
     args = p.parse_args(argv)
     {"summary": cmd_summary, "labels": cmd_labels, "kappa": cmd_kappa}[args.command](args)
 

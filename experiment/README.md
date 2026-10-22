@@ -110,19 +110,21 @@ py experiment\run.py --run-id full --cases all --workers 1 --wait-for-reset 72 &
 
 Primary metric, paired differences:
 
-| Comparison | Diff | 95% CI | p |
-| --- | --- | --- | --- |
-| `second-round` − `baseline` | +0.153 | [+0.056, +0.264] | 0.019 |
-| `debate` − `baseline` | +0.139 | [+0.056, +0.222] | 0.008 |
-| `ptu` − `baseline` | +0.125 | [+0.014, +0.250] | 0.093 |
-| `ptu` − `debate` | −0.014 | [−0.097, +0.083] | 1.0 |
-| `ptu` − `second-round` | −0.028 | [−0.125, +0.056] | 0.77 |
-| `debate` − `second-round` | −0.014 | [−0.083, +0.056] | 1.0 |
+| Comparison | Diff | 95% CI | p | p (Holm) |
+| --- | --- | --- | --- | --- |
+| `second-round` − `baseline` | +0.153 | [+0.056, +0.264] | 0.019 | 0.093 |
+| `debate` − `baseline` | +0.139 | [+0.056, +0.222] | 0.008 | **0.048** |
+| `ptu` − `baseline` | +0.125 | [+0.014, +0.250] | 0.093 | 0.37 |
+| `ptu` − `debate` | −0.014 | [−0.097, +0.083] | 1.0 | 1.0 |
+| `ptu` − `second-round` | −0.028 | [−0.125, +0.056] | 0.77 | 1.0 |
+| `debate` − `second-round` | −0.014 | [−0.083, +0.056] | 1.0 | 1.0 |
+
+`p (Holm)` corrects for the 6 comparisons on each metric (`p_holm` in `comparisons.csv`).
 
 What it shows:
 
-- **A second round helps, and the format of that round doesn't detectably matter.** All three two-round techniques reconcile 12–15 points more tensions than `baseline`. PTU, debate and plain second-round can't be told apart: the PTU vs debate CI spans about ±9 points. Most of the gain seems to come from lenses reading each other's round-1 findings.
-- **PTU never left a clash.** `tension_clash_rate` was 0 for PTU, against 0.063 for debate (diff −0.063, CI [−0.125, −0.014], p = 0.12) and 0.132 for `baseline` (p = 0.007). PTU also had the fewest contradictions (0.13 per run vs 0.50 for debate, p = 0.08). The direction is consistent, but the p-values from one rep fall short of firm.
+- **A second round helps, and the format of that round doesn't detectably matter.** All three two-round techniques reconcile 12–15 points more tensions than `baseline`. After Holm correction only `debate` − `baseline` stays below 0.05 (0.048), so the effect of a second round is likely but rests on one rep. PTU, debate and plain second-round can't be told apart: the PTU vs debate CI spans about ±9 points. Most of the gain seems to come from lenses reading each other's round-1 findings.
+- **PTU never left a clash.** `tension_clash_rate` was 0 for PTU, against 0.063 for debate (diff −0.063, CI [−0.125, −0.014], p = 0.12, Holm 0.48) and 0.132 for `baseline` (p = 0.007, Holm 0.040). PTU also had the fewest contradictions (0.13 per run vs 0.50 for debate, p = 0.08). The direction is consistent, but the p-values from one rep fall short of firm.
 - **PTU's guardrails are slightly worse.** Compared with debate, PTU has lower precision (−0.032, p = 0.01), about 6 more findings per run (p < 0.001) that are 12 words longer each, about 9% more tokens (p = 0.01), and 73 s more wall time per run. Debate has the shortest findings of any arm.
 - **Recall is at the ceiling** (0.99–0.995 for every arm), so defect detection doesn't separate the techniques.
 - **PTU predictions:** a lens predicted about 46% of each peer's round-1 findings (`pred_recall` 0.463), and over 80% of its predictions came true. Architecture and consistency findings were the hardest to predict (35–40%), and tests findings the easiest (about 58–63%).
@@ -132,7 +134,8 @@ Caveats specific to this run:
 - **One rep and 24 tension cases.** Differences of a few points are within noise.
 - **The primary metric was chosen after the pilot** (see [Primary metric](#primary-metric-tension-reconciliation)).
 - **The tension-case baselines came from calibration** (see the reuse note above).
-- **For `ptu` − `baseline`, the CI excludes 0 but p = 0.09.** The bootstrap and the permutation test disagree at the margin, so treat that effect as suggestive.
+- **For `ptu` − `baseline`, the CI excludes 0 but p = 0.09 (Holm 0.37).** The bootstrap and the permutation test disagree at the margin, so treat that effect as suggestive.
+- **The judge hasn't been checked against a human on tensions yet.** See [Checking the judge against a human](#checking-the-judge-against-a-human).
 - **One stray prediction row.** One PTU run has a single lens-consistency prediction about itself (n = 1 in `predictions.csv`). It doesn't affect the per-run metrics.
 - **One slow outlier.** `case-06/debate` took 847 s against a typical 70–90 s, but finished normally.
 
@@ -194,7 +197,7 @@ Tension statuses: `reconciled` means one finding gives a fix that satisfies both
 | `out_of_lane_rate` | Final findings whose main subject is another lens's area ÷ all final findings |
 | `tokens_total`, `wall_seconds` | From the `claude -p` result |
 
-`comparisons.csv` pairs runs by case (averaging reps within a case) for PTU vs D, PTU vs C1, D vs C1, and each vs C0. Each row has the mean difference (a − b), a bootstrap 95% CI over cases, and a paired sign-flip permutation p-value. The p-value is exact when there are 16 or fewer cases, and uses 20,000 random permutations otherwise.
+`comparisons.csv` pairs runs by case (averaging reps within a case) for PTU vs D, PTU vs C1, D vs C1, and each vs C0. Each row has the mean difference (a − b), a bootstrap 95% CI over cases, and a paired sign-flip permutation p-value. The p-value is exact when there are 16 or fewer cases, and uses 20,000 random permutations otherwise. `p_holm` applies a Holm correction across the 6 comparisons within each metric. Use it for any claim about the primary metric.
 
 ## Checking the judge against a human
 
@@ -211,6 +214,24 @@ py experiment\analyze.py kappa --run-id pilot
 ```
 
 `labels` won't overwrite an existing `labels.csv` unless you pass `--force`.
+
+### Tension statuses (the primary metric)
+
+```bat
+py experiment\analyze.py labels --run-id full --task tensions
+```
+
+This samples 40 (run, tension) items, 10 per technique: 5 the judge called `reconciled` and 5 it didn't. Each item gets its own file in `results\full\analysis\tension_items\`, with the tension, its two fixes and the reconciled fix, all the run's final findings, and the status definitions the judge uses. The technique isn't shown. For each item, read its file and fill `human_status` in `tension_labels.csv` with one of `reconciled`, `unreconciled_conflict`, `unreconciled_compatible`, `one_side_only` or `neither`. Optionally put the reconciling finding's id in `human_reconciling`. Don't open `tension_labels_key.csv` until you're done. Then run:
+
+```bat
+py experiment\analyze.py kappa --run-id full --task tensions
+```
+
+It writes `tension_kappa.json`, with agreement and Cohen's kappa for the full status and for reconciled-or-not, reconciled agreement per technique, and the confusion counts. Each item has about 40 findings, so budget a few minutes per item. Use `--n 24` for a smaller sample.
+
+Two limits:
+- **The 50/50 sampling inflates `reconciled`** relative to the run, so read the agreement as the judge's accuracy on each kind of call, not as an estimate of the reconciled rate.
+- **Blinding is partial.** Some round-2 findings mention other lenses or say several lenses agreed, which can reveal that an item isn't `baseline`.
 
 ## Layout
 
