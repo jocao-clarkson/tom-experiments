@@ -129,6 +129,26 @@ What it shows:
 - **Recall is at the ceiling** (0.99–0.995 for every arm), so defect detection doesn't separate the techniques.
 - **PTU predictions:** a lens predicted about 46% of each peer's round-1 findings (`pred_recall` 0.463), and over 80% of its predictions came true. Architecture and consistency findings were the hardest to predict (35–40%), and tests findings the easiest (about 58–63%).
 
+Blinded re-judge (`judge.py --blind`, `analysis-blind/`): tension statuses re-judged after the findings were rewritten to remove references to peers, rounds and other findings.
+
+| Technique | Same status as original | Gained `reconciled` | Lost `reconciled` | `tension_resolved_rate` | `tension_clash_rate` |
+| --- | --- | --- | --- | --- | --- |
+| `baseline` | 63/70 | 4 | 3 | 0.479 (was 0.465) | 0.104 (was 0.132) |
+| `second-round` | 67/70 | 1 | 2 | 0.604 (was 0.618) | 0.035 (same) |
+| `debate` | 68/70 | 1 | 1 | 0.604 (same) | 0.076 (was 0.063) |
+| `ptu` | 67/70 | 0 | 2 | 0.563 (was 0.590) | 0.014 (was 0) |
+
+| Comparison (blinded) | `tension_resolved_rate` diff | 95% CI | p (Holm) |
+| --- | --- | --- | --- |
+| `second-round` − `baseline` | +0.125 | [+0.056, +0.208] | 0.045 |
+| `debate` − `baseline` | +0.125 | [+0.042, +0.222] | 0.15 |
+| `ptu` − `baseline` | +0.083 | [−0.056, +0.222] | 1.0 |
+| `ptu` − `debate` | −0.042 | [−0.125, +0.042] | 1.0 |
+
+- **No sign the leak biased the judge.** Blinding changed 3–7% of statuses in the round-2 arms and 10% in `baseline`, which had nothing to blind. That is about the judge's own run-to-run disagreement (89% agreement between two majority-of-3 scores), so the changes look like judge noise, not a correction of bias.
+- **The overall picture holds:** a second round adds about 12 points of reconciliation, and the three round-2 techniques can't be told apart.
+- **Which single comparison is significant isn't stable.** Originally `debate` − `baseline` passed Holm and `second-round` − `baseline` didn't. Blinded, it's the other way round. Treat "a second round helps" as likely, not established.
+- **PTU's clash result weakens.** PTU now has 1 clash (0.014). Against `baseline` it's p = 0.03 uncorrected but 0.18 after Holm, and against `debate` 0.60 after Holm. PTU's reconciled rate fell slightly, and it's no longer clearly above `baseline`.
 Qualitative read ([notes/full-rep1-qualitative.md](notes/full-rep1-qualitative.md)):
 
 - **The round-2 differences look like noise.** 28 of 70 tensions are reconciled by all four techniques and 19 by none. The round-2 techniques each win only 2–7 tensions the others miss, scattered across cases and lens pairs. Round 2 helps most where architecture is one side of the tension. Risk+tests tensions are never reconciled by any technique.
@@ -140,7 +160,7 @@ Caveats specific to this run:
 - **The primary metric was chosen after the pilot** (see [Primary metric](#primary-metric-tension-reconciliation)).
 - **The tension-case baselines came from calibration** (see the reuse note above).
 - **For `ptu` − `baseline`, the CI excludes 0 but p = 0.09 (Holm 0.37).** The bootstrap and the permutation test disagree at the margin, so treat that effect as suggestive.
-- **The judge isn't blind to technique in practice.** Round-2 findings cite peers and round 1 ("Four lenses independently flagged this", "My round-1 claim ... was wrong"), and PTU does so most. Baseline findings never do. Whether this biased the judge is unknown. A blinded re-judge would strip these references first.
+- **The original judge wasn't blind to technique in practice.** Round-2 findings cite peers and round 1, and PTU does so most. The blinded re-judge above found no sign this biased the statuses.
 - **Judge noise is the same size as the round-2 gaps.** 6–12 tensions per technique were decided 2–1, and near-identical findings sometimes got different statuses (case-25 T3).
 - **The judge hasn't been checked against a human on tensions yet.** See [Checking the judge against a human](#checking-the-judge-against-a-human).
 - **One stray prediction row.** One PTU run has a single lens-consistency prediction about itself (n = 1 in `predictions.csv`). It doesn't affect the per-run metrics.
