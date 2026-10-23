@@ -246,7 +246,7 @@ py experiment\analyze.py kappa --run-id pilot
 ### Tension statuses (the primary metric)
 
 ```bat
-py experiment\analyze.py labels --run-id full --task tensions
+py experiment\analyze.py labels --run-id full --task tensions --blind
 ```
 
 This samples 40 (run, tension) items, 10 per technique: 5 the judge called `reconciled` and 5 it didn't. Each item gets its own file in `results\full\analysis\tension_items\`, with the tension, its two fixes and the reconciled fix, all the run's final findings, and the status definitions the judge uses. The technique isn't shown. For each item, read its file and fill `human_status` in `tension_labels.csv` with one of `reconciled`, `unreconciled_conflict`, `unreconciled_compatible`, `one_side_only` or `neither`. Optionally put the reconciling finding's id in `human_reconciling`. Don't open `tension_labels_key.csv` until you're done. Then run:
@@ -259,7 +259,7 @@ It writes `tension_kappa.json`, with agreement and Cohen's kappa for the full st
 
 Two limits:
 - **The 50/50 sampling inflates `reconciled`** relative to the run, so read the agreement as the judge's accuracy on each kind of call, not as an estimate of the reconciled rate.
-- **Blinding is partial.** Some round-2 findings mention other lenses or say several lenses agreed, which can reveal that an item isn't `baseline`.
+- **Use `--blind`.** It shows the blinded findings from `judge.py --blind` and scores you against the blinded judge. Without it, round-2 findings that mention peers or round 1 can reveal that an item isn't `baseline`.
 
 ## Layout
 

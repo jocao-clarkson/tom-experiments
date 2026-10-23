@@ -463,7 +463,9 @@ def tension_labels(args):
         sys.exit(f"{labels_path} already exists (it may hold your labels). Use --force to overwrite.")
     root = RESULTS / args.run_id / "runs"
     pools = {}
-    for jpath in sorted(root.glob("*/*/rep*/judge.json")):
+    # With --blind, items show the blinded findings and are scored against the blinded judge.
+    judge_file = "judge_blind.json" if args.blind else "judge.json"
+    for jpath in sorted(root.glob(f"*/*/rep*/{judge_file}")):
         if not (jpath.parent / "done.json").exists():
             continue
         judged = json.loads(jpath.read_text(encoding="utf-8"))
@@ -496,10 +498,11 @@ def tension_labels(args):
         (items_dir / f"{lid}.md").write_text(tension_item_md(lid, t, judged), encoding="utf-8")
         label_rows.append({"label_id": lid, "item_file": f"tension_items/{lid}.md",
                            "human_status": "", "human_reconciling": "", "notes": ""})
-        key_rows.append({"label_id": lid, **judged["run"], "tension": t["id"], "judge_status": status})
+        key_rows.append({"label_id": lid, **judged["run"], "tension": t["id"], "judge_status": status,
+                         "judge_file": judge_file})
     write_csv(labels_path, label_rows, ["label_id", "item_file", "human_status", "human_reconciling", "notes"])
     write_csv(out / "tension_labels_key.csv", key_rows,
-              ["label_id", "run_id", "case", "technique", "rep", "tension", "judge_status"])
+              ["label_id", "run_id", "case", "technique", "rep", "tension", "judge_status", "judge_file"])
     print(f"wrote {len(label_rows)} tension items to {labels_path} (one file each in {items_dir})")
     print("For each item, read its file and fill human_status with one of: " + ", ".join(TENSION_STATUSES))
     print("Don't open tension_labels_key.csv until you're done; it shows the judge's answers.")
@@ -631,6 +634,8 @@ def main(argv=None):
     l.add_argument("--seed", type=int, default=1)
     l.add_argument("--force", action="store_true", help="overwrite an existing labels file")
     l.add_argument("--task", choices=["contradictions", "tensions"], default="contradictions")
+    l.add_argument("--blind", action="store_true",
+                   help="tensions: show blinded findings and score against judge.py --blind")
     k = sub.add_parser("kappa", help="judge-vs-human agreement from your filled-in labels")
     k.add_argument("--run-id", required=True)
     k.add_argument("--task", choices=["contradictions", "tensions"], default="contradictions")
