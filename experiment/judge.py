@@ -204,7 +204,7 @@ def call_judge(task, data, args):
                 result_text = (result or {}).get("result") or ""
                 if runner.usage_limited(out, result_text, err):
                     raise UsageLimit(runner.reset_time(out + result_text + err))
-                last_error = f"exit={code} timed_out={timed_out} {err.strip()[:300]}"
+                last_error = f"exit={code} timed_out={timed_out} {(err.strip() or result_text or out.strip())[:300]}"
                 continue
             try:
                 parsed = parse_answer(result.get("result", ""), task)
