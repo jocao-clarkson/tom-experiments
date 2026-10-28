@@ -162,7 +162,7 @@ Caveats specific to this run:
 - **For `ptu` − `baseline`, the CI excludes 0 but p = 0.09 (Holm 0.37).** The bootstrap and the permutation test disagree at the margin, so treat that effect as suggestive.
 - **The original judge wasn't blind to technique in practice.** Round-2 findings cite peers and round 1, and PTU does so most. The blinded re-judge above found no sign this biased the statuses.
 - **Judge noise is the same size as the round-2 gaps.** 6–12 tensions per technique were decided 2–1, and near-identical findings sometimes got different statuses (case-25 T3).
-- **The judge hasn't been checked against a human on tensions yet.** See [Checking the judge against a human](#checking-the-judge-against-a-human).
+- **The tension judge has been checked against a second model, not a human.** On every tension in the 35 sampled runs, Opus agreed with the blinded Sonnet judge on reconciled-or-not for 95% (kappa 0.90), with no lean toward any technique (see [Cross-model check](#cross-model-check-in-place-of-human-labels)). Both models use the same checklist, so a flaw in the checklist would get past this check.
 - **One stray prediction row.** One PTU run has a single lens-consistency prediction about itself (n = 1 in `predictions.csv`). It doesn't affect the per-run metrics.
 - **One slow outlier.** `case-06/debate` took 847 s against a typical 70–90 s, but finished normally.
 
