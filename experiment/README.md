@@ -261,6 +261,28 @@ Two limits:
 - **The 50/50 sampling inflates `reconciled`** relative to the run, so read the agreement as the judge's accuracy on each kind of call, not as an estimate of the reconciled rate.
 - **Use `--blind`.** It shows the blinded findings from `judge.py --blind` and scores you against the blinded judge. Without it, round-2 findings that mention peers or round 1 can reveal that an item isn't `baseline`.
 
+### Cross-model check (in place of human labels)
+
+The human labels turned out to be too slow to fill in, so a second model labelled the same items instead:
+
+```bat
+py experiment\cross_judge.py --run-id full --workers 3 --wait-for-reset
+```
+
+Opus judges the 35 runs behind the 40 sampled items. It gets the same blinded inputs, prompt and majority-of-3 as the Sonnet judge in `judge_blind.json`, and the script compares the two. It writes `tension_cross_opus.csv` and `tension_cross_opus.json`, from 105 Opus calls. It finished without hitting a usage limit.
+
+| | n | status agreement | status kappa | reconciled agreement | reconciled kappa |
+|---|---|---|---|---|---|
+| 40 sampled items | 40 | 85% | 0.72 | 93% | 0.85 |
+| every tension in those 35 runs | 103 | 89% | 0.81 | 95% | 0.90 |
+
+What it shows:
+- **The two models agree closely on the primary metric.** Reconciled-or-not agrees about as well as two Sonnet majority-of-3 scores agree with each other (89% full status). So the score doesn't hinge on a quirk of Sonnet.
+- **Opus is slightly more lenient.** Of the 5 reconciled disagreements among the 103 tensions, Opus credited `reconciled` in 4: 2 in `baseline`, 1 in `ptu` and 1 in `second-round`. Sonnet credited it in 1, in `ptu`. Neither model favours a technique. If Opus were the judge, the `baseline` rate would rise slightly, which would shrink the round-2 advantage a little rather than grow it.
+- **The other disagreements are `unreconciled_compatible` vs `unreconciled_conflict`.** There were 5 of them, and they don't affect the primary metric.
+
+Its limit: both models apply the same checklist to the same inputs, so they would share any error in the checklist itself, such as how strictly it reads "on its own". This check rules out Sonnet-specific errors; it isn't a human check.
+
 ## Layout
 
 ```
@@ -270,6 +292,7 @@ experiment/
   run.py                runs the gate; also the fake claude for --mock
   judge.py              judges finished runs
   analyze.py            summary / labels / kappa
+  cross_judge.py        second-model check of the blinded tension judge
   results/<run-id>/     git-ignored
     config.json
     runs/<case>/<technique>/rep<k>/
