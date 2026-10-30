@@ -17,7 +17,7 @@ From Claude Code in this repo:
 /validation-orchestrator phase=implementation spec=specs/foo/spec.md plan=specs/foo/plan.md base=main
 ```
 
-All arguments are optional. Without them, the skill looks for a spec and plan under `specs/`, `docs/specs/`, `.specs/`, or any `spec*.md` / `plan*.md`. It infers the phase from whether the current diff touches files the plan names. If it can't find a spec, it stops.
+All arguments are optional. Without them, the skill looks for a spec and plan under `specs/`, `docs/specs/`, `.specs/`, or any `spec*.md` / `plan*.md`. It infers the phase from whether the current diff touches files the plan names. If it can't find a spec, it stops. A plan-phase-only `technique=baseline|second-round|debate|ptu` argument exists for the experiment in [`experiment/`](experiment/README.md); leave it out for normal use.
 
 The result is a report written next to the spec as `validation-plan.md` or `validation-implementation.md`, with one of three verdicts:
 

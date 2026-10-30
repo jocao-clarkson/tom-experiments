@@ -1,0 +1,85 @@
+{
+  "case_id": "case-12",
+  "type": "tension",
+  "domain": "data-pipeline",
+  "defects": [
+    {
+      "id": "D1",
+      "description": "The backfill is a new top-level scripts/backfill_fx.py that re-implements the extract -> normalize -> replace_partition loop and its own count logging instead of reusing runner.process_partition / runner.run (which already accepts an explicit partitions list) and obs.log_summary; pipeline logic is duplicated outside the pipeline package and pipeline/cli.py would import from scripts/.",
+      "location": "plan.md steps 7 and 9; fixture/pipeline/runner.py, fixture/pipeline/obs.py",
+      "expected_lenses": ["lens-architecture"],
+      "severity": "major"
+    },
+    {
+      "id": "D2",
+      "description": "The backfill starts at yesterday's partition and runs with no coordination with the nightly job, but the nightly job always reprocesses the last lookback_days partitions (default 3, config.py / runner.pending_partitions), so both jobs write the same partitions. Warehouse.replace_partition is DELETE then executemany INSERT in one transaction, which is not safe for two concurrent writers (duplicated rows, violating R4/AC3), and the 9-hour backfill started at 20:00 spans the 02:00 nightly window (also adding warehouse load against the 04:00 deadline).",
+      "location": "plan.md step 7 and rollout notes; fixture/pipeline/load.py, fixture/pipeline/runner.py, fixture/pipeline/config.py",
+      "expected_lenses": ["lens-risk"],
+      "severity": "major"
+    },
+    {
+      "id": "D3",
+      "description": "R6 requires a per-reason breakdown of quarantined counts, but the plan only adds a single missing_fx_rate count to the summary; existing missing_fields reasons are not broken down.",
+      "location": "plan.md step 6; spec.md R6",
+      "expected_lenses": ["lens-spec-coverage"],
+      "severity": "minor"
+    },
+    {
+      "id": "D4",
+      "description": "The plan says run() logs the new missing_fx_rate field with the rest of the summary, but runner.run logs through obs.log_summary, which only writes the fixed SUMMARY_FIELDS (loaded, quarantined) as logfmt integers. The new field is silently dropped from the partition log, so AC4 is not met in the actual log output; obs.py is not in the plan.",
+      "location": "plan.md step 6; fixture/pipeline/obs.py, fixture/pipeline/runner.py",
+      "expected_lenses": ["lens-architecture", "lens-consistency"],
+      "severity": "major"
+    },
+    {
+      "id": "D5",
+      "description": "Rates are loaded for rate_date = partition date, but partitions are keyed by the UTC day the collector received the event (extract.read_partition), and the nightly reprocesses late arrivals, so a partition contains events whose occurred_at is an earlier day. R1 requires the rate for the event's occurred_at UTC date; late events get the wrong day's rate (or are quarantined if the currency is missing that day). Fix: key rates by (date, currency) and load all needed dates in one query.",
+      "location": "plan.md steps 2 and 3; spec.md R1; fixture/pipeline/extract.py",
+      "expected_lenses": ["lens-consistency"],
+      "severity": "major"
+    },
+    {
+      "id": "D6",
+      "description": "Restart logic skips every partition on or before last_done, but the backfill processes newest first, so after a Ctrl-C the remaining unprocessed partitions are all older than last_done and are skipped, while the already-done newer ones are reprocessed. The backfill silently ends incomplete, violating the safe stop/restart constraint and R3.",
+      "location": "plan.md steps 7 and 8; spec.md R3, non-functional constraints",
+      "expected_lenses": ["lens-risk", "lens-consistency"],
+      "severity": "major"
+    },
+    {
+      "id": "D7",
+      "description": "The plan claims existing tests pass unchanged because normalize defaults rates to None, but step 5 makes process_partition call fx.load_rates(wh, ...), which calls wh.query; the shared FakeWarehouse in tests/conftest.py has no query method (the plan's RatesWarehouse lives only in test_backfill.py), so test_runner.py::test_run_advances_checkpoint_and_is_rerunnable will fail and conftest needs updating.",
+      "location": "plan.md step 5 and test strategy; fixture/tests/conftest.py, fixture/tests/test_runner.py",
+      "expected_lenses": ["lens-tests"],
+      "severity": "minor"
+    },
+    {
+      "id": "D8",
+      "description": "Missing-rate rows are quarantined with reason 'missing_fx_rate:<currency>', but R2/AC2 specify reason = 'missing_fx_rate' exactly; the planned test only checks startswith, so it would not catch the mismatch.",
+      "location": "plan.md step 4 and test strategy; spec.md R2, AC2",
+      "expected_lenses": ["lens-consistency"],
+      "severity": "minor"
+    }
+  ],
+  "tensions": [
+    {
+      "id": "T1",
+      "lenses": ["lens-architecture", "lens-risk"],
+      "related_defects": ["D1", "D2"],
+      "description": "Architecture's fix is to drop the standalone script and run the backfill through runner.run(cfg, wh, today, partitions=newest_first), which looks complete. Risk's fix is to serialize the backfill with the nightly job via state.run_lock, as cli.py does for the nightly run. Combined: runner.run calls state.record after each partition, which moves the nightly checkpoint (state.py), so a newest-first backfill leaves the checkpoint ~90 days back and the next nightly reprocesses ~89 partitions (~9 hours, missing 04:00); and run_lock is O_EXCL fail-fast, so holding it (for the run or per partition) makes the 02:00 nightly fail or be delayed. Both violate the spec NFR that a backfill must not delay the nightly or change which partitions it processes. Evidence is split across runner.py/obs.py (reuse), load.py/config.py (overlap and non-atomic replace), state.py/cli.py (checkpoint and lock), and the spec NFR.",
+      "lens_a_fix": "Delete scripts/backfill_fx.py and implement the backfill by calling runner.run(cfg, wh, today, partitions=[...newest first...]).",
+      "lens_b_fix": "Have the backfill acquire state.run_lock (for the whole run or around each partition) so it never writes concurrently with the nightly job.",
+      "reconciliation": "Reuse runner.process_partition plus obs.log_summary inside the pipeline package (e.g. pipeline/backfill.py), not runner.run, so state.record / the nightly checkpoint are never touched; take no shared lock; instead restrict the backfill to partitions older than the nightly's reprocessing window (start at today - lookback_days - 1 from config, going back N days, newest first), so the two jobs never write the same partition and neither blocks the other.",
+      "subtle": true
+    },
+    {
+      "id": "T2",
+      "lenses": ["lens-spec-coverage", "lens-architecture"],
+      "related_defects": ["D3", "D4"],
+      "description": "Spec-coverage's fix for R6 is a full per-reason breakdown, naturally a dict such as Counter(r['reason'] for r in quarantined) added to the summary. Architecture's fix for the dropped field is to add missing_fx_rate to obs.SUMMARY_FIELDS. Combined, the breakdown cannot go through obs.log_summary: it writes only fixed field names as logfmt integers (int(value)), so a nested dict keyed by raw reason strings (which embed details like 'missing_fields:event_id,user_id' and, per the plan, 'missing_fx_rate:EUR') either crashes the log call or is dropped, and dynamic keys cannot be listed in SUMMARY_FIELDS.",
+      "lens_a_fix": "Add a per-reason breakdown to the summary, e.g. quarantined_by_reason = Counter of quarantine reasons.",
+      "lens_b_fix": "Add missing_fx_rate to obs.SUMMARY_FIELDS so the new count reaches the partition log.",
+      "reconciliation": "Break quarantined counts down by reason class (the reason code before ':'), using the exact code 'missing_fx_rate' per R2, and emit each as a flat integer field with a fixed name (e.g. quarantined_missing_fields, quarantined_missing_fx_rate) registered in obs.SUMMARY_FIELDS; update obs.py in the plan and test the logged line, not just the returned dict.",
+      "subtle": true
+    }
+  ]
+}

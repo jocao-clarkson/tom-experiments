@@ -1,0 +1,95 @@
+{
+  "case_id": "case-16",
+  "type": "tension",
+  "domain": "api",
+  "defects": [
+    {
+      "id": "D1",
+      "description": "Step 4 applies prices as up to 500 sequential single-row UPDATE round trips inside one transaction, so row locks on the first products rows are held for the whole loop. Checkout's quote query (store.QuoteLines in checkout.go) reads those rows FOR SHARE with SET LOCAL lock_timeout = '150ms' and maps the lock timeout to ErrBusy / 503, so a bulk run makes checkout quotes for affected SKUs fail.",
+      "location": "plan.md step 4; fixture/internal/store/checkout.go; fixture/internal/api/products.go (Quote)",
+      "expected_lenses": ["lens-risk"],
+      "severity": "major"
+    },
+    {
+      "id": "D2",
+      "description": "Unknown SKUs (RowsAffected == 0) are skipped and returned in a 'skipped' list while the rest of the batch is applied. Spec R2/AC2 make unknown SKUs validation errors: respond 422 listing them and apply nothing; the 'skipped' response field is also not in R5's response shape.",
+      "location": "plan.md steps 4 and 7, rollout notes; spec.md R2, R5, AC2",
+      "expected_lenses": ["lens-consistency", "lens-spec-coverage"],
+      "severity": "major"
+    },
+    {
+      "id": "D3",
+      "description": "Step 3 adds a Store.DB() accessor and step 4 runs BeginTx and raw SQL in the api handler, breaking the fixture rule that the store package is the only one issuing SQL (comment on store.Store). The bulk write belongs in a store method.",
+      "location": "plan.md steps 3-4; fixture/internal/store/store.go",
+      "expected_lenses": ["lens-architecture"],
+      "severity": "major"
+    },
+    {
+      "id": "D4",
+      "description": "Outbox events are written in a second transaction after the price commit. Spec R4 requires them in the same transaction; a failure or crash between the two loses events for committed price changes, and 'log and backfill' is not a guarantee.",
+      "location": "plan.md step 5; spec.md R4",
+      "expected_lenses": ["lens-consistency", "lens-risk"],
+      "severity": "major"
+    },
+    {
+      "id": "D5",
+      "description": "The route is registered without auth.RequireScope(\"catalog:write\"); R6/AC4 require the scope check (the PATCH route in router.go wraps it). Relying on the authenticate wrapper plus gateway reachability is not authorization.",
+      "location": "plan.md step 8; fixture/internal/api/router.go; spec.md R6, AC4",
+      "expected_lenses": ["lens-spec-coverage", "lens-risk"],
+      "severity": "blocker"
+    },
+    {
+      "id": "D6",
+      "description": "No test covers all-or-nothing behaviour (AC2: 422 and no price/outbox change when one SKU is unknown; AC3: no change after a DB failure mid-request) or the 403 path (AC4). The unit tests stop before the transaction and the integration test covers only AC1 and timing.",
+      "location": "plan.md test strategy; spec.md AC2, AC3, AC4",
+      "expected_lenses": ["lens-tests"],
+      "severity": "major"
+    },
+    {
+      "id": "D7",
+      "description": "The bulk price_changed payload is sku, price_cents, currency only. Store.UpdatePrice (the single-item path) also sends previous_price_cents, read with SELECT ... FOR UPDATE before the update, so R4's 'same payload shape' and the NFR that downstream consumers need no changes are not met; the rollout note claiming consumers need no changes is wrong.",
+      "location": "plan.md step 5, rollout notes; fixture/internal/store/store.go UpdatePrice; spec.md R4, non-functional constraints",
+      "expected_lenses": ["lens-spec-coverage", "lens-consistency"],
+      "severity": "major"
+    },
+    {
+      "id": "D8",
+      "description": "Step 10 adds a histogram and 'reuses the existing request-duration histogram', but the fixture has no metrics package or metrics dependency (go.mod only has pgx). Adding one is a new third-party dependency the spec forbids, and the referenced histogram does not exist.",
+      "location": "plan.md step 10; fixture/go.mod; spec.md non-functional constraints",
+      "expected_lenses": ["lens-architecture", "lens-consistency"],
+      "severity": "minor"
+    }
+  ],
+  "tensions": [
+    {
+      "id": "T1",
+      "lenses": ["lens-risk", "lens-consistency"],
+      "related_defects": ["D1", "D2", "D4"],
+      "description": "Risk sees (only in checkout.go) that checkout's quote waits at most 150 ms for product row locks, so its natural fix for the long per-item loop is to commit in small chunks and keep extra work such as outbox inserts out of the price transaction. Consistency, from spec R2/R3/R4, wants one transaction holding every price update and every outbox row, with unknown SKUs rejected inside it, which naively means 500 UPDATE + 500 Enqueue round trips under lock (the UpdatePrice pattern). Chunking breaks atomicity; the naive single transaction doubles the lock hold and blows the 150 ms checkout budget.",
+      "lens_a_fix": "Commit the updates in chunks (e.g. 50 items per transaction) and keep the outbox writes outside the price transaction, so no transaction holds products row locks for long.",
+      "lens_b_fix": "Apply all items and write all outbox events in one transaction (UPDATE then Enqueue per item, as Store.UpdatePrice does), and reject the request with 422 if any SKU is unknown.",
+      "reconciliation": "Keep a single transaction but make its lock-holding part a few statements long: check existence of all SKUs with one SELECT ... WHERE sku = ANY($1) before BEGIN (422 on any unknown, apply nothing); inside the transaction run one set-based UPDATE ... FROM unnest(...) locking rows in SKU order, plus one multi-row outbox insert (or the outbox rows inserted before the UPDATE, since they lock no products rows), then commit; treat a RowsAffected shortfall as a race and roll back. This needs the 150 ms lock_timeout / FOR SHARE quote from the risk side (checkout.go) to size the transaction, and the R3/R4 single-transaction requirement from the consistency side to rule out chunking.",
+      "subtle": true
+    },
+    {
+      "id": "T2",
+      "lenses": ["lens-tests", "lens-architecture"],
+      "related_defects": ["D6", "D3", "D8"],
+      "description": "Tests' natural fix for the missing AC2/AC3/AC4 coverage is handler-level tests, injecting a database failure mid-batch through the handler-owned *sql.DB that the plan exposes via Store.DB() (e.g. go-sqlmock or a fault-injecting driver). Architecture's natural fix removes Store.DB() and moves all SQL into a store method, and the spec forbids new third-party dependencies. The test seam tests relies on is exactly what architecture deletes, and sqlmock is a new dependency.",
+      "lens_a_fix": "Add handler tests for AC2, AC3 and AC4; for AC3 make the 250th UPDATE fail via go-sqlmock (or a fake driver) on the handler's *sql.DB and assert rollback.",
+      "lens_b_fix": "Remove Store.DB() and the handler SQL; add a store.UpdatePrices method that owns the transaction; add no new dependencies.",
+      "reconciliation": "Test atomicity at the store layer, in the existing integration harness (internal/store/store_integration_test.go, openTestStore on CATALOG_TEST_DSN): call the new store.UpdatePrices directly with 500 items where one mid-batch item has price_cents 10000001, which the products CHECK (price_cents BETWEEN 1 AND 10000000) in migrations/0001_products.sql rejects inside the statement, and assert no price or outbox row changed (AC3); test unknown-SKU rejection there too (AC2). Test AC4 as a router unit test (RequireScope rejects before the handler, no DB). No sqlmock, no DB() accessor. Needs the AC2/AC3/AC4 gap from the tests side and the store-only-SQL rule, no-new-deps constraint, existing store harness and DB CHECK constraint from the architecture side.",
+      "subtle": false
+    },
+    {
+      "id": "T3",
+      "lenses": ["lens-spec-coverage", "lens-risk"],
+      "related_defects": ["D7", "D1"],
+      "description": "Spec-coverage sees that R4 requires the single-item payload shape, which (in store.go) includes previous_price_cents obtained by a SELECT ... FOR UPDATE before the UPDATE; its natural fix is to mirror that per item, adding 500 more locking round trips (or, if moved before the transaction to keep it short, reading previous prices that can be stale). Risk, from checkout.go, wants the transaction's lock hold under checkout's 150 ms lock_timeout. Mirroring UpdatePrice per item and keeping locks short cannot both be done as written.",
+      "lens_a_fix": "Add previous_price_cents to each event, reading each item's current price with SELECT ... FOR UPDATE before its UPDATE, as Store.UpdatePrice does.",
+      "lens_b_fix": "Minimise statements and lock hold inside the price transaction (chunk it or keep reads and outbox work outside it).",
+      "reconciliation": "Capture the previous prices inside the same single set-based statement: e.g. WITH old AS (SELECT sku, price_cents FROM products WHERE sku = ANY($1) ORDER BY sku FOR UPDATE) UPDATE products p SET ... FROM old, unnest(...) v WHERE ... RETURNING p.sku, old.price_cents, and build the outbox rows (same four-field payload) from the RETURNING rows in one multi-row insert in that transaction. Needs the previous_price_cents payload shape from the spec-coverage side (store.go + R4) and the 150 ms lock budget from the risk side (checkout.go) to reject the per-item read.",
+      "subtle": true
+    }
+  ]
+}

@@ -1,0 +1,95 @@
+{
+  "case_id": "case-03",
+  "type": "tension",
+  "domain": "auth",
+  "defects": [
+    {
+      "id": "D1",
+      "description": "Steps 1-2 create a new password_reset_tokens table and PasswordResetTokenRepo that duplicate the existing OneTimeTokenRepo / one_time_tokens table (hashed storage, atomic consume, revokeAll by purpose, a purpose column designed to take new purposes) instead of adding a 'password_reset' TokenPurpose.",
+      "location": "plan.md steps 1-2; fixture/src/db/oneTimeTokenRepo.ts; fixture/migrations/0017_one_time_tokens.sql",
+      "expected_lenses": ["lens-architecture"],
+      "severity": "major"
+    },
+    {
+      "id": "D2",
+      "description": "passwordResetTtlMinutes defaults to 60 minutes, but the spec requires reset tokens to be valid for 30 minutes (R2) and rejected after 30 minutes (AC2).",
+      "location": "plan.md step 3; spec.md R2, AC2",
+      "expected_lenses": ["lens-consistency"],
+      "severity": "major"
+    },
+    {
+      "id": "D3",
+      "description": "Step 6 sends the reset email by awaiting HttpMailer.send directly in the request, bypassing the Postgres-backed JobQueue 'send_mail' job that the existing EmailVerificationService uses for all outgoing mail (with retries and backoff via startWorker in server.ts).",
+      "location": "plan.md steps 6, 9; fixture/src/services/emailVerification.ts; fixture/src/jobs/queue.ts",
+      "expected_lenses": ["lens-architecture"],
+      "severity": "major"
+    },
+    {
+      "id": "D4",
+      "description": "requestReset does the user lookup's follow-up work (invalidate, insert token, and an awaited mail-provider HTTP call with up to a 5s timeout) only when the account exists, before the route returns 202. The response-time difference reveals whether an email has an account, against the timing non-functional constraint and the intent of R1/AC1. A provider failure also turns into a 500 only for existing accounts.",
+      "location": "plan.md steps 6, 8; spec.md non-functional constraints; fixture/src/mail/mailer.ts",
+      "expected_lenses": ["lens-risk"],
+      "severity": "major"
+    },
+    {
+      "id": "D5",
+      "description": "The per-client-IP limit from R5 (at most 20 reset requests per IP per hour) is missing: the limiter in step 5 is keyed only by normalised email and requestReset takes no client address.",
+      "location": "plan.md steps 5, 6; spec.md R5",
+      "expected_lenses": ["lens-spec-coverage"],
+      "severity": "major"
+    },
+    {
+      "id": "D6",
+      "description": "The limiter keeps its windows in a per-process Map. identity-api runs 3+ instances behind round-robin load balancing and is redeployed several times a day, so the effective limit is several times higher and resets on every deploy; AC5 ('even if requests land on different API instances') is not met. Postgres is available as a shared store.",
+      "location": "plan.md step 5; spec.md R5, AC5, non-functional constraints",
+      "expected_lenses": ["lens-risk"],
+      "severity": "blocker"
+    },
+    {
+      "id": "D7",
+      "description": "confirmReset never signs the user out of existing sessions, although R3 and AC4 require it; UserRepo.revokeSessions already exists for this.",
+      "location": "plan.md step 7; spec.md R3, AC4; fixture/src/db/userRepo.ts",
+      "expected_lenses": ["lens-spec-coverage"],
+      "severity": "major"
+    },
+    {
+      "id": "D8",
+      "description": "The test strategy has no test for session revocation (AC4); token expiry (AC2) and reuse (AC3) are only simulated by a mocked consume returning null, so neither the 30-minute boundary nor single use is exercised; and the AC5 limiter test runs on one in-process instance, so it cannot show the cross-instance behaviour AC5 asks for.",
+      "location": "plan.md test strategy",
+      "expected_lenses": ["lens-tests"],
+      "severity": "major"
+    }
+  ],
+  "tensions": [
+    {
+      "id": "T1",
+      "lenses": ["lens-architecture", "lens-consistency"],
+      "related_defects": ["D1", "D2"],
+      "description": "Architecture's natural fix is to drop the new table and inject the existing OneTimeTokenRepo with a 'password_reset' purpose. Consistency's natural fix is to change the plan's passwordResetTtlMinutes default to 30. Each looks complete, but together they are wrong: OneTimeTokenRepo takes its TTL once, in its constructor, and the single instance in server.ts is built with config.linkTtlMinutes, whose default in config.ts is 1440 (24 hours). Reusing that instance issues 24-hour reset tokens and leaves the 30-minute setting unused. The repo file itself shows only a ttlMinutes constructor parameter, not the value.",
+      "lens_a_fix": "Delete steps 1-2; add 'password_reset' to TokenPurpose and have PasswordResetService use the existing OneTimeTokenRepo (issue/consume/revokeAll) injected from server.ts.",
+      "lens_b_fix": "Set the passwordResetTtlMinutes default to 30 so reset tokens expire after 30 minutes as R2/AC2 require.",
+      "reconciliation": "Reuse OneTimeTokenRepo and the one_time_tokens table with purpose 'password_reset', but give reset tokens their own TTL: construct a second OneTimeTokenRepo in server.ts with config.passwordResetTtlMinutes (default 30), or add a per-purpose/per-call TTL to issue(), while verification links keep config.linkTtlMinutes (1440). Needs the architecture-side fact that the shared instance's TTL comes from config.linkTtlMinutes = 24h (server.ts + config.ts) and the consistency-side fact that resets must last 30 minutes, not the plan's 60.",
+      "subtle": true
+    },
+    {
+      "id": "T2",
+      "lenses": ["lens-architecture", "lens-risk"],
+      "related_defects": ["D3", "D4"],
+      "description": "Architecture's natural fix is to follow EmailVerificationService and enqueue a 'send_mail' job whose payload carries the link. Risk's natural fix for the timing oracle is to stop awaiting the send and fire it off in the background after responding. Risk's fix bypasses the durable queue and loses mails on the frequent redeploys. Architecture's fix puts the raw reset token (inside the link) into jobs.payload, which is persisted in Postgres and kept after completion (done_at only), and server.ts's onError logs the full job payload on every failed attempt, breaking 'raw tokens must never be stored or logged'. It also still does the lookup, token insert and enqueue only for existing accounts, so a timing gap remains.",
+      "lens_a_fix": "Replace the direct HttpMailer.send in step 6 with jobs.enqueue('send_mail', { template: 'password_reset', to, vars: { link } }), as EmailVerificationService does.",
+      "lens_b_fix": "Respond 202 without awaiting the account-dependent work: run the lookup, token creation and mailer.send in the background (not awaited) so both paths return in the same time.",
+      "reconciliation": "Add a new job kind (e.g. 'password_reset_request') that is enqueued for every request that passes the limiter, existing account or not, carrying only the normalised email and no token. Its worker handler does the lookup, revokes earlier tokens, issues the token and calls mailer.send directly, and records the audit event only on success. The raw token then exists only in memory and in the email, and the request path does the same work (one insert) in both cases. Needs the architecture-side facts (mail goes through the durable JobQueue; payloads are persisted, and server.ts logs failed job payloads) and the risk-side facts (the timing constraint; raw tokens must never be stored or logged).",
+      "subtle": false
+    },
+    {
+      "id": "T3",
+      "lenses": ["lens-spec-coverage", "lens-risk"],
+      "related_defects": ["D5", "D6"],
+      "description": "Spec-coverage's natural fix adds the missing per-IP limit keyed on req.ip. Risk's natural fix moves the limiter's counters into Postgres so they hold across instances. server.ts never sets Express 'trust proxy', so behind the load balancer req.ip is the balancer's own address for every request. The real client address is the last X-Forwarded-For entry, as server.ts's clientAddress() helper for the access log shows. With both fixes applied, every user shares one per-IP counter across all instances, so after 20 requests an hour service-wide every reset silently gets a 202 and no email.",
+      "lens_a_fix": "Add the R5 per-IP limit (20 per hour) to the limiter, keyed by req.ip passed from the route.",
+      "lens_b_fix": "Store the limiter's windows in Postgres (a counter table or a count over recent rows) instead of a per-process Map, so the 5-per-email limit holds across instances and deploys.",
+      "reconciliation": "Keep both limits in Postgres, but key the per-IP counter on the client address the load balancer appends (the last X-Forwarded-For entry, by moving server.ts's clientAddress() into src/http and reusing it, or by setting trust proxy to the single LB hop), not on raw req.ip. Add a test with distinct X-Forwarded-For values. Needs the spec-coverage-side fact (R5's per-IP limit is missing) and the risk-side fact (the counters must be shared across instances), plus the server.ts detail that req.ip is the balancer's address.",
+      "subtle": true
+    }
+  ]
+}

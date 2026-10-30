@@ -51,4 +51,18 @@ FINDINGS:
   recommendation: <concrete fix>
 ```
 
+**Peer predictions (only when your brief says `PREDICT PEERS: yes`; otherwise leave this out).** Append this block after the output above:
+
+```
+PREDICTIONS:
+- peer: <one of the other four lenses>
+  will_flag:
+    - <an issue you expect that lens to raise, with its location>
+  conflicts_with_mine:
+    - mine: <your finding id>
+      expect: <what that lens will recommend, and why it conflicts with your finding>
+```
+
+Cover all four other lenses. Write `will_flag: none` or `conflicts_with_mine: none` where you expect nothing.
+
 Report `FINDINGS: none` if you found nothing. Every finding must cite evidence you actually looked at, and you must not speculate about files you did not open. Your job is analysis only: never edit, create, or delete files.

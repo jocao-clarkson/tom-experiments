@@ -1,7 +1,7 @@
 ---
 name: validation-orchestrator
 description: Validation gate for spec-driven development. Use after a plan is written (before implementation) to validate the plan against the spec, and again after implementation to validate the code against the spec and plan. Fans out parallel lens subagents (coverage, consistency, architecture, risk, tests), verifies and merges their findings, and returns a PASS / PASS_WITH_NOTES / FAIL verdict.
-argument-hint: "[phase=plan|implementation] [spec=<path>] [plan=<path>] [base=<ref>]"
+argument-hint: "[phase=plan|implementation] [spec=<path>] [plan=<path>] [base=<ref>] [technique=baseline|second-round|debate|ptu]"
 allowed-tools: Agent, Read, Grep, Glob, Bash, Write
 ---
 
@@ -56,6 +56,22 @@ Return findings in the standard lens format.
 ```
 
 Wait for every lens to report back before moving on. Don't guess at a lens's results while it is still running.
+
+### Techniques (experiment only)
+
+If the arguments don't include `technique`, skip this subsection. Everything else in this skill applies as written.
+
+If `technique` is set, the phase must be `plan`. If it isn't, stop and say that techniques are plan-phase only. Then do the following:
+
+- `technique=baseline`: run step 2 exactly as above (one round).
+- `technique=second-round`, `technique=debate`, or `technique=ptu`: read `techniques/<technique>.md` in this skill's directory and follow it. It replaces step 2 with two lens rounds. Between rounds you write the round-1 outputs to `round1-findings.md` next to the spec. That file and the validation report are the only files you may write.
+
+Two optional arguments split the rounds across sessions:
+
+- `stop=round1`: run only round 1 as the technique describes it (for `ptu`, with the PREDICT PEERS lines), then stop. Don't write a round-1 file.
+- `round1=<path>`: round 1 already ran in an earlier session. Don't spawn round-1 lenses, and don't write a round-1 file. `<path>` holds the five round-1 outputs verbatim, in the technique's layout. `round1-briefs.md` next to it holds the round-1 brief each lens got, in the same layout. Use `<path>` as the ROUND-1 FINDINGS FILE, take each lens's FEATURE SUMMARY and FOCUS NOTES from its round-1 brief, and continue from the step after round 1. Read `<path>` yourself only when the technique needs its contents from you: `ptu`'s reveal does, but `second-round` and `debate` only pass the path on.
+
+Once the last lens round is done, stop. Skip steps 3 to 5: don't verify, merge, or judge the findings, and don't write a report. The experiment scores the lens outputs directly from the transcript. End with the single line `Lens rounds complete.`
 
 ## 3. Verify and merge
 

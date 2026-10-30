@@ -1,0 +1,95 @@
+{
+  "case_id": "case-06",
+  "type": "tension",
+  "domain": "api",
+  "defects": [
+    {
+      "id": "D1",
+      "description": "Amount sorts switch to OFFSET pagination with a separate offset page token returned as 'next_page' and passed back as '?page='. This contradicts R4 (the same opaque cursor model and {data, next_cursor} envelope as /v1/customers) and AC2 (OFFSET skips or repeats rows when invoices change between pages), and adds a second pagination token beside the shared cursor codec in pagination.go and the listResponse envelope instead of extending them. The plan's AC5 claim also fails for the two created-at sorts: -created_at and created_at share the same sort-less cursor, so one sort's cursor is accepted by the other.",
+      "location": "plan.md overview, steps 3, 4, 7, rollout notes; spec.md R4, AC2, AC5; fixture/internal/httpapi/pagination.go, respond.go",
+      "expected_lenses": ["lens-consistency", "lens-architecture"],
+      "severity": "major"
+    },
+    {
+      "id": "D2",
+      "description": "Amount sorts have no supporting index: migration 003 only creates (tenant_id, created_at DESC, id DESC) and (tenant_id, customer_id). Ordering a tenant's invoices (up to 1M) by amount_cents, plus growing OFFSETs, means full sorts that will miss the 250 ms p95, and the spec freezes new indexes this quarter. The plan does not address amount-sort performance.",
+      "location": "plan.md step 3; spec.md non-functional constraints; fixture/migrations/003_invoices.sql",
+      "expected_lenses": ["lens-risk"],
+      "severity": "major"
+    },
+    {
+      "id": "D3",
+      "description": "Plan adds an invoices-only writeInvoiceError with its own envelope instead of using the shared writeError/errorBody in respond.go, which every endpoint (and the auth middleware) uses and the SDKs parse generically.",
+      "location": "plan.md step 6; fixture/internal/httpapi/respond.go, customers.go",
+      "expected_lenses": ["lens-architecture"],
+      "severity": "major"
+    },
+    {
+      "id": "D4",
+      "description": "The invoice error helper uses code 'bad_request' and a 'field' key, but R5/AC3 require code 'invalid_parameter' and a 'param' key naming the offending parameter.",
+      "location": "plan.md step 6; spec.md R5, AC3",
+      "expected_lenses": ["lens-consistency"],
+      "severity": "major"
+    },
+    {
+      "id": "D5",
+      "description": "Malformed created_after/created_before values (including date-only strings) are silently skipped instead of returning 400 invalid_parameter with param naming the field. This contradicts R5 and AC3 and silently widens the result set.",
+      "location": "plan.md step 5; spec.md R5, AC3",
+      "expected_lenses": ["lens-consistency", "lens-spec-coverage"],
+      "severity": "major"
+    },
+    {
+      "id": "D6",
+      "description": "Test strategy has no AC2 multi-page traversal with ties for every sort, no AC3 malformed-timestamp test, no AC4 cross-tenant customer_id test, and no AC5 cursor/sort mismatch test. Store tests only assert generated SQL strings, and the customers-style fake ignores the cursor, so nothing exercises keyset correctness.",
+      "location": "plan.md test strategy; fixture/internal/httpapi/customers_test.go",
+      "expected_lenses": ["lens-tests"],
+      "severity": "major"
+    },
+    {
+      "id": "D7",
+      "description": "Plan adds the third-party squirrel query builder, while the store package uses hand-written pgx SQL and go.mod has only pgx. The spec requires platform approval for new dependencies; the plan defers that to the PR.",
+      "location": "plan.md step 1, rollout notes; fixture/internal/store/customers.go; fixture/go.mod",
+      "expected_lenses": ["lens-architecture"],
+      "severity": "minor"
+    },
+    {
+      "id": "D8",
+      "description": "Created-at sorts reuse the shared cursor, whose encodeCursor stores created_at as Unix milliseconds (pagination.go), but invoices.created_at is a microsecond-precision timestamptz defaulting to now() (migration 003; customers.created_at is timestamptz(3), so milliseconds are exact only there). A keyset predicate against the truncated value skips rows whose created_at lies between the truncated and real value of the page's last row on -created_at, and repeats the last row on created_at, breaking AC2.",
+      "location": "plan.md overview, step 2; fixture/internal/httpapi/pagination.go; fixture/migrations/003_invoices.sql, 001_customers.sql",
+      "expected_lenses": ["lens-risk"],
+      "severity": "major"
+    }
+  ],
+  "tensions": [
+    {
+      "id": "T1",
+      "lenses": ["lens-consistency", "lens-risk"],
+      "related_defects": ["D1", "D2"],
+      "description": "Consistency (spec R4/AC2/AC5 against plan steps 3-4) wants amount sorts on the same keyset next_cursor as the other sorts, keeping all four R3 sorts. Risk (migration 003's index list plus the spec's p95 and index-freeze constraints) sees that no whole-tenant amount sort can meet the p95 without a new index, which is frozen, so it wants amount sorts dropped or restricted. Consistency's fix keeps an unservable query; risk's fix removes or narrows a required sort and says nothing about the cursor model.",
+      "lens_a_fix": "Replace the offset/next_page token with a keyset cursor encoding (sort, amount_cents, id), returned as next_cursor, for all four sorts.",
+      "lens_b_fix": "Drop amount sorts, since a (tenant_id, amount_cents, id) index cannot be added this quarter and unindexed amount sorts breach the p95.",
+      "reconciliation": "One keyset next_cursor for every sort that encodes sort name, sort key and id (consistency's fact: R4's single cursor model and AC5). Amount sorts are accepted only together with customer_id, which the existing (tenant_id, customer_id) index bounds to one customer's invoices (risk's fact: which indexes migration 003 has, plus the freeze); without customer_id they return 400 invalid_parameter with param=sort. This narrowing of R3 is raised with the spec owner, with descoping amount sorts until the repartition as the alternative.",
+      "subtle": false
+    },
+    {
+      "id": "T2",
+      "lenses": ["lens-architecture", "lens-consistency"],
+      "related_defects": ["D3", "D4"],
+      "description": "Architecture's natural fix is to delete writeInvoiceError and call the shared writeError(w, 400, \"invalid_parameter\", msg) exactly as listCustomers does, which looks complete. That envelope has no param key, so it silently drops what R5/AC3 require. Consistency's natural fix is to correct the code and key names inside the bespoke helper, keeping the per-endpoint envelope architecture wants removed. Adding a param argument to writeError is not free either: auth.Tenant takes writeError as its onErr callback with that exact signature (router.go).",
+      "lens_a_fix": "Remove writeInvoiceError and use the shared writeError for all invoice errors, as listCustomers does.",
+      "lens_b_fix": "Emit code 'invalid_parameter' and a 'param' key exactly as R5/AC3 specify.",
+      "reconciliation": "Extend the shared envelope additively in respond.go: an optional Param field (json \"param,omitempty\") on errorDetail and a writeParamError(w, param, msg) wrapper that writes 400 invalid_parameter, leaving writeError's signature unchanged because router.go passes it to auth.Tenant as onErr. Needs consistency's fact (AC3's exact param shape) and architecture's facts (the envelope is shared by every endpoint and the SDKs, and writeError's signature is pinned by the auth middleware).",
+      "subtle": true
+    },
+    {
+      "id": "T3",
+      "lenses": ["lens-risk", "lens-architecture"],
+      "related_defects": ["D8", "D1"],
+      "description": "Risk's natural fix for the millisecond truncation is to make encodeCursor/decodeCursor use microseconds. Done in place, that changes the meaning of the shared cursor's 'c' field: cursors already issued by /v1/customers carry milliseconds, would decode as microseconds to a January 1970 timestamp, and the next customers page would come back empty, silently ending clients' pagination. Architecture's natural fix for D1 is to extend the shared pagination.go cursor (add sort and amount) and use it for every invoice sort; done as-is it carries the millisecond truncation into all invoice created-at pages. Each fix looks complete alone.",
+      "lens_a_fix": "Encode created_at in the cursor at full precision (UnixMicro or RFC3339Nano) in encodeCursor/decodeCursor.",
+      "lens_b_fix": "Use one shared cursor for all invoice sorts by extending pagination.go's Cursor with sort and amount fields, returned as next_cursor via listResponse, as /v1/customers does.",
+      "reconciliation": "Extend the shared cursor additively: new optional fields for a microsecond timestamp, the sort name and the amount. Invoice cursors always write them; decode prefers the microsecond field and falls back to the existing millisecond 'c', so outstanding customers cursors (exact, because customers.created_at is timestamptz(3)) still resolve to the same position; the invoices handler rejects a cursor whose sort does not match (AC5). Needs risk's fact (invoices.created_at is a microsecond timestamptz in migration 003, against the millisecond wire format) and architecture's fact (the codec and its 'c' field are shared with /v1/customers clients, so its meaning cannot change).",
+      "subtle": true
+    }
+  ]
+}

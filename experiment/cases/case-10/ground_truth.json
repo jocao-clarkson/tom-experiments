@@ -1,0 +1,95 @@
+{
+  "case_id": "case-10",
+  "type": "tension",
+  "domain": "mobile-backend",
+  "defects": [
+    {
+      "id": "D1",
+      "description": "The handler sniffs the type with http.DetectContentType and decodes with image.Decode itself (steps 4-5) instead of reusing media.Decode, which already sniffs JPEG/PNG from the bytes, checks dimensions with image.DecodeConfig before allocating pixels, and returns ErrUnsupportedType / ErrTooLarge.",
+      "location": "plan.md steps 4-5; fixture/internal/media/imageproc.go Decode",
+      "expected_lenses": ["lens-architecture"],
+      "severity": "major"
+    },
+    {
+      "id": "D2",
+      "description": "No pixel-dimension check happens before the full image.Decode, so the 40-megapixel limit of R3/AC4 (422 image_too_large without decoding pixel data) is not implemented, and a small PNG declaring a huge canvas (decompression bomb) can exhaust the 512 MB pod.",
+      "location": "plan.md step 5; spec.md R3, AC4, non-functional constraints",
+      "expected_lenses": ["lens-risk"],
+      "severity": "blocker"
+    },
+    {
+      "id": "D3",
+      "description": "The route bypasses authed/LimitBody, and the handler reads the body with io.ReadAll (or lets ParseMultipartForm spill to temp files) before any size check. A client can stream an arbitrarily large body into memory or onto disk; the ContentLength check does not help for chunked bodies. Breaks AC2 and the bounded-memory constraint (512 MB pods, about 40 concurrent requests).",
+      "location": "plan.md steps 1-3, rollout note on ParseMultipartForm; fixture/internal/api/middleware.go LimitBody; fixture/internal/api/server.go authed",
+      "expected_lenses": ["lens-risk"],
+      "severity": "blocker"
+    },
+    {
+      "id": "D4",
+      "description": "Step 3 applies the 5 MB limit to r.ContentLength, i.e. the whole request. In multipart mode the boundaries and part headers push an exactly 5,242,880-byte image over 5 << 20, so the multipart half of AC1 fails. R1 puts the limit on the image, in both modes.",
+      "location": "plan.md step 3; spec.md R1, AC1",
+      "expected_lenses": ["lens-consistency"],
+      "severity": "major"
+    },
+    {
+      "id": "D5",
+      "description": "Step 8 deletes the previous version's objects before SetAvatarVersion commits the new version (step 9). If the update fails or conflicts, the user still points at v{old}, whose objects are gone, breaking AC5; R7 says deletion happens once the new version is in place.",
+      "location": "plan.md steps 8-9; spec.md R7, AC5",
+      "expected_lenses": ["lens-risk", "lens-consistency"],
+      "severity": "major"
+    },
+    {
+      "id": "D6",
+      "description": "R6/AC6 (GET /v1/me includes the avatar object with signed URLs, or null when there is no avatar) has no plan step; meResponse/getMe in profile.go are never extended.",
+      "location": "plan.md (missing); fixture/internal/api/profile.go; spec.md R6, AC6",
+      "expected_lenses": ["lens-spec-coverage"],
+      "severity": "major"
+    },
+    {
+      "id": "D7",
+      "description": "Step 11 adds github.com/DATA-DOG/go-sqlmock to go.mod, violating the non-functional constraint 'No new modules in go.mod'. The repo's existing handler tests (profile_test.go) use a real Postgres through testDB instead.",
+      "location": "plan.md step 11, test strategy; spec.md non-functional constraints; fixture/go.mod; fixture/internal/api/profile_test.go",
+      "expected_lenses": ["lens-architecture"],
+      "severity": "major"
+    },
+    {
+      "id": "D8",
+      "description": "The test strategy has no test for AC5 (a non-conflict DB failure leaves the existing avatar objects and URLs working), AC4 (48 MP PNG gets 422), AC2 (5.1 MB gets 413 with bounded memory) or the exactly-5,242,880-byte boundary of AC1 in raw and multipart modes; it also declares no new media tests needed.",
+      "location": "plan.md test strategy; spec.md AC1, AC2, AC4, AC5",
+      "expected_lenses": ["lens-tests"],
+      "severity": "major"
+    }
+  ],
+  "tensions": [
+    {
+      "id": "T1",
+      "lenses": ["lens-architecture", "lens-risk"],
+      "related_defects": ["D1", "D2"],
+      "description": "Architecture's fix is to replace steps 4-5 with media.Decode, which already does the pre-decode dimension check. Risk's fix is a 40 MP image.DecodeConfig check in the avatar handler. Taking architecture's fix in place of risk's looks complete but lets a 48 MP image through: media.MaxPixels is a process-wide variable that NewServer (server.go) sets from config.MaxImagePixels, whose default in config.go is 100 MP for catalog scans. imageproc.go itself shows no value. Keeping risk's handler check duplicates the logic architecture wants centralised.",
+      "lens_a_fix": "Replace the handler's DetectContentType + image.Decode with media.Decode and map its errors to 415/422.",
+      "lens_b_fix": "Call image.DecodeConfig in the avatar handler and reject anything over 40 MP with 422 before decoding.",
+      "reconciliation": "Reuse media.Decode but give it a per-call pixel limit (e.g. DecodeWithLimit(r, maxPixels) or an options argument). The avatar handler passes 40 MP and maps ErrTooLarge to 422 image_too_large and ErrUnsupportedType to 415. Other decoders keep the shared config value. Setting media.MaxPixels or MAX_IMAGE_PIXELS to 40 MP globally would also cap catalog images. Needs the spec's 40 MP limit (risk side) plus the fact that media.Decode's limit is the shared 100 MP config default set in NewServer/config.go (architecture side). Add a media test for the per-call limit and an avatar test for AC4.",
+      "subtle": true
+    },
+    {
+      "id": "T2",
+      "lenses": ["lens-risk", "lens-consistency"],
+      "related_defects": ["D3", "D4"],
+      "description": "Risk's fix is to cap the body at 5 MB with the existing LimitBody/authed (e.g. authed(s.putAvatar, 5 << 20)) and stop using unbounded io.ReadAll and ParseMultipartForm. Consistency's fix is to apply the 5 MB limit to the image (raw body or file part), not the whole request. A 5 << 20 request cap still rejects an exactly-5 MB image sent as multipart, which breaks AC1. Measuring only the image, on the other hand, looks like dropping the cap risk just added. The conflict is over the exact limit value and where it is applied.",
+      "lens_a_fix": "Route through LimitBody(5 << 20) and read with bounded readers instead of io.ReadAll/ParseMultipartForm.",
+      "lens_b_fix": "Check the 5 MB limit against the image bytes (the raw body or the file part), not r.ContentLength of the whole multipart request.",
+      "reconciliation": "Cap the request with LimitBody at 5 MB plus a small fixed multipart allowance (e.g. 64 KB). Stream multipart with r.MultipartReader() instead of ParseMultipartForm (no temp files), and read the file part or raw body through io.LimitReader(5<<20 + 1), returning 413 body_too_large on overflow or MaxBytesError. Memory stays bounded (risk's fact: unbounded reads, 512 MB pods) and an exactly-5,242,880-byte multipart image is accepted (consistency's fact: R1/AC1 limit the image, multipart adds overhead).",
+      "subtle": true
+    },
+    {
+      "id": "T3",
+      "lenses": ["lens-architecture", "lens-tests"],
+      "related_defects": ["D7", "D8"],
+      "description": "Architecture's fix for D7 is to drop go-sqlmock and test against Postgres through the existing testDB helper, as profile_test.go does. Tests' fix for D8 adds AC5 and other failure-path tests, which with the planned mock are just a scripted UPDATE error. Combined, the failure-injection tests land on testDB, which cannot easily make SetAvatarVersion fail, and which skips when TEST_DATABASE_URL is unset. .github/workflows/ci.yml runs go test with no database service or that variable, so in CI the AC5/409 tests would silently skip.",
+      "lens_a_fix": "Remove the go-sqlmock requirement and write avatar handler tests against Postgres via testDB, following profile_test.go.",
+      "lens_b_fix": "Add handler tests where SetAvatarVersion returns a non-conflict error (AC5: 500, v{old} objects and URLs still intact), plus AC4, AC2 and the exact-5 MB AC1 cases, scripting failures through the DB mock.",
+      "reconciliation": "Add a narrow interface in internal/api for the two calls the handler needs (Get, SetAvatarVersion), satisfied by *users.Repo. Keep Server.Users concrete, because patchMe uses s.Users.DB directly. Give avatar_test.go an in-file fake that can return ErrConflict or an arbitrary error. That adds no module and the tests run in CI without a database. Keep only an optional testDB integration test for the real CAS UPDATE. Needs the no-new-modules constraint (architecture side) plus the fact that CI provides no database, so testDB-based tests skip there (tests side).",
+      "subtle": true
+    }
+  ]
+}

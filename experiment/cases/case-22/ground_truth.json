@@ -1,0 +1,95 @@
+{
+  "case_id": "case-22",
+  "type": "tension",
+  "domain": "data-pipeline",
+  "defects": [
+    {
+      "id": "D1",
+      "description": "Step 3 builds a new toMinor helper (strconv.ParseFloat, multiply by 100, math.Round) instead of reusing the shared money.Parse. Floating point can mis-round, and the hardcoded factor of 100 is wrong for JPY (exponent 0) and KWD (exponent 3), which breaks R2's 'same rules as orders'.",
+      "location": "plan.md step 3; fixture/internal/money/money.go",
+      "expected_lenses": ["lens-architecture", "lens-risk"],
+      "severity": "major"
+    },
+    {
+      "id": "D2",
+      "description": "Step 5 reads every record of a file into a slice and sorts it before processing. extract.Reader allocates a map per record, so a 2M-row file held in memory blows the 512 MB RSS budget of AC4 (the worker container limit is 512Mi, sharing 1 GB with a sidecar). The existing reader and orders.go stream in batches.",
+      "location": "plan.md step 5; fixture/internal/extract/csvreader.go; fixture/deploy/worker.yaml",
+      "expected_lenses": ["lens-risk"],
+      "severity": "major"
+    },
+    {
+      "id": "D3",
+      "description": "Step 7 applies daily aggregates as increments (refunds_minor = refunds_minor + chunk total). Re-running the job, or receiving a corrected refund, adds the amounts again even though the refunds upsert is keyed, violating R6/AC3. It also departs from the fixture pattern, where touched days are rebuilt from source tables with Store.RecomputeDailyRevenue, and puts SQL in the pipeline layer.",
+      "location": "plan.md step 7; fixture/internal/load/store.go; fixture/internal/pipeline/orders.go",
+      "expected_lenses": ["lens-consistency", "lens-architecture"],
+      "severity": "blocker"
+    },
+    {
+      "id": "D4",
+      "description": "Step 8's dead-letter file contains only refund_id, order_id and deadletter_reason, but R4 requires the original row plus deadletter_reason so the refund can be replayed once its order arrives.",
+      "location": "plan.md step 8; spec.md R4",
+      "expected_lenses": ["lens-spec-coverage"],
+      "severity": "major"
+    },
+    {
+      "id": "D5",
+      "description": "Step 9 logs every dead-lettered record with %v, writing customer_email unmasked to the job log (shipped by the log sidecar), violating the PII constraint. The pii package (MaskEmail/RedactRow) exists for this.",
+      "location": "plan.md step 9; fixture/internal/pii/pii.go",
+      "expected_lenses": ["lens-risk"],
+      "severity": "major"
+    },
+    {
+      "id": "D6",
+      "description": "Test strategy has no automated test for rerun idempotency (AC3) or the aggregate math (checked by hand against staging), no test of the refunds_minor = 30 case of AC1, and no test of AC4 time/memory (deferred to watching production).",
+      "location": "plan.md Test strategy",
+      "expected_lenses": ["lens-tests"],
+      "severity": "major"
+    },
+    {
+      "id": "D7",
+      "description": "R3 says that when a refund_id arrives more than once, the version with the latest updated_at is kept. The plan's UpsertRefunds overwrites unconditionally like UpsertOrders, and rows are processed in refunded_at order (corrections share refunded_at, and sort order among ties is arbitrary), so whichever version is processed last wins, not the latest updated_at. Corrections across files or reruns of an older file also overwrite newer data.",
+      "location": "plan.md steps 4-5; spec.md R3; fixture/internal/load/store.go",
+      "expected_lenses": ["lens-consistency"],
+      "severity": "major"
+    },
+    {
+      "id": "D8",
+      "description": "R1 says the provider exports refund amounts as negative decimal strings (e.g. -19.99), but step 3 rejects zero and negative values as invalid_amount, so every real refund row would be rejected; the plan's tests use positive values only. The plan never says how the exported sign maps to refunds_minor, which R5 subtracts from gross.",
+      "location": "plan.md step 3 and Test strategy; spec.md R1, R5, AC1",
+      "expected_lenses": ["lens-consistency"],
+      "severity": "blocker"
+    }
+  ],
+  "tensions": [
+    {
+      "id": "T1",
+      "lenses": ["lens-spec-coverage", "lens-risk"],
+      "related_defects": ["D4", "D5"],
+      "description": "Coverage sees that R4 requires the original row in the dead-letter file and recommends copying it in full. That row includes customer_email, and the dead-letter directory is the payments-support-share volume (fixture/deploy/worker.yaml), i.e. a file handed to another team, which the PII constraint and pii package forbid unmasked. Risk only sees the PII leak in the log line (the plan's file holds ids only), so its fix (redact the log) looks complete; the coverage fix as written puts raw email in another team's share.",
+      "lens_a_fix": "Write the full original CSV row plus deadletter_reason to the dead-letter file so rows can be replayed (R4).",
+      "lens_b_fix": "Stop logging raw records: log only refund_id and reason, or run the record through pii.RedactRow before logging.",
+      "reconciliation": "Write every original column plus deadletter_reason to the dead-letter file, but pass each row through pii.RedactRow (or drop customer_email) first, because the dead-letter dir is the payments support share (deploy/worker.yaml, risk side). This still satisfies replay because the refunds table does not store email (R3) and replay keys on refund_id/order_id/amount (coverage side). Logs carry only refund_id and reason.",
+      "subtle": false
+    },
+    {
+      "id": "T2",
+      "lenses": ["lens-consistency", "lens-risk"],
+      "related_defects": ["D7", "D2"],
+      "description": "Consistency's natural fix for R3 latest-updated_at-wins builds on the plan's load-and-sort structure: sort or dedupe the whole file by (refund_id, updated_at) so the newest version is applied last. Risk's natural fix for AC4 memory is to drop the in-memory slice and stream in batches like orders.go, which removes any whole-file ordering, so with the unconditional upsert the last-read version wins again. Each fix undoes the other.",
+      "lens_a_fix": "Sort or dedupe the buffered records by refund_id and updated_at before upserting, so the latest version of each refund is the one written.",
+      "lens_b_fix": "Do not buffer or sort the file; stream records with extract.Reader and upsert in cfg.BatchSize batches as orders.go does.",
+      "reconciliation": "Stream in batches (risk's fact: AC4 512 MB / map-per-record reader / 512Mi container) and enforce R3 in the database instead of by ordering (consistency's fact: latest updated_at wins, UpsertOrders-style upsert is unconditional): store updated_at in refunds and make UpsertRefunds 'ON CONFLICT (refund_id) DO UPDATE ... WHERE refunds.updated_at < EXCLUDED.updated_at'. Order then does not matter within a file, across files, or on reruns, and memory stays bounded; aggregates are recomputed for touched days afterwards.",
+      "subtle": true
+    },
+    {
+      "id": "T3",
+      "lenses": ["lens-architecture", "lens-consistency"],
+      "related_defects": ["D1", "D8"],
+      "description": "Architecture's fix is to replace the float helper with money.Parse. Consistency's fix is to stop rejecting negative amounts because the provider exports them negative. Applied together as written, money.Parse preserves the sign, so '-19.99' is stored as amount_minor -1999, refunds_minor sums negative and net_minor = gross - refunds increases revenue; if the plan's positive-only check is kept instead, every row is rejected. Neither fix alone addresses the sign.",
+      "lens_a_fix": "Use money.Parse(amount, currency) for conversion, as orders do, instead of ParseFloat * 100.",
+      "lens_b_fix": "Accept the provider's negative amounts instead of rejecting them as invalid_amount, and test with negative inputs like -0.10.",
+      "reconciliation": "Convert with money.Parse (architecture side: exponent-aware, no floats, keeps the sign), then require the result to be negative and store its absolute value as amount_minor, rejecting zero or positive amounts as invalid_amount (consistency side: R1 negative export convention, R5 net = gross minus refunds, AC1 refunds_minor = 30 from -0.10 and -0.20). Tests cover -0.10/-0.20 summing to 30, -12.345 rejected, and a JPY/KWD amount.",
+      "subtle": true
+    }
+  ]
+}

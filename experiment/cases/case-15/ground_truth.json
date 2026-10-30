@@ -1,0 +1,122 @@
+{
+  "case_id": "case-15",
+  "type": "tension",
+  "domain": "mobile-backend",
+  "defects": [
+    {
+      "id": "D1",
+      "description": "Plan builds a new offset-based inbox cursor (src/lib/inboxCursor.ts, OFFSET query) instead of reusing the shared keyset helpers in src/lib/pagination.ts (parseLimit, decodeCursor, toPage) that activity.ts uses. Offset paging duplicates or skips rows when new notifications arrive between page fetches, violating AC1, and departs from the existing list convention.",
+      "location": "plan.md steps 3-4; fixture/src/lib/pagination.ts; fixture/src/routes/activity.ts; spec.md AC1",
+      "expected_lenses": [
+        "lens-architecture",
+        "lens-risk"
+      ],
+      "severity": "major"
+    },
+    {
+      "id": "D2",
+      "description": "Plan caps limit at 100; spec R1 and AC2 require any limit above 50 to be treated as 50 (limit=200 must return at most 50 items).",
+      "location": "plan.md step 3; spec.md R1, AC2",
+      "expected_lenses": [
+        "lens-spec-coverage",
+        "lens-consistency"
+      ],
+      "severity": "major"
+    },
+    {
+      "id": "D3",
+      "description": "markRead(id) runs `UPDATE notifications SET read_at = COALESCE(read_at, now()) WHERE id = $1` with no user_id predicate, so any authenticated user can mark another user's notification read and gets 204 instead of 404 (violates R2, AC4).",
+      "location": "plan.md steps 2 and 6; spec.md R2, AC4",
+      "expected_lenses": [
+        "lens-risk"
+      ],
+      "severity": "blocker"
+    },
+    {
+      "id": "D4",
+      "description": "The repository issues statements through plain `query` with hand-written user_id predicates, bypassing the codebase convention of running per-user statements through `userQuery` (src/db/pool.ts), which sets app.user_id for row-level security as activity.ts does.",
+      "location": "plan.md step 2; fixture/src/db/pool.ts; fixture/src/routes/activity.ts",
+      "expected_lenses": [
+        "lens-architecture"
+      ],
+      "severity": "minor"
+    },
+    {
+      "id": "D5",
+      "description": "read-all is one unbounded `UPDATE ... WHERE user_id = $1 AND read_at IS NULL`. Heavy users have tens of thousands of unread rows (spec non-functional), and the request pool enforces a 2000 ms statement_timeout (fixture/src/config.ts db.statementTimeoutMs, applied in pool.ts), so the statement can time out, roll back and return 500 while holding row locks the producers contend with.",
+      "location": "plan.md step 7; fixture/src/config.ts; fixture/src/db/pool.ts; spec.md non-functional constraints",
+      "expected_lenses": [
+        "lens-risk"
+      ],
+      "severity": "major"
+    },
+    {
+      "id": "D6",
+      "description": "Test strategy has no test for AC5 (after read-all, unread-count returns 0; the read-all test only checks 204 and the repo argument), no cross-user test for AC4, and no test of paging stability under concurrent inserts for AC1; the mocked-pool tests cannot detect a missing user filter.",
+      "location": "plan.md test strategy; spec.md AC1, AC4, AC5",
+      "expected_lenses": [
+        "lens-tests"
+      ],
+      "severity": "major"
+    },
+    {
+      "id": "D7",
+      "description": "unread-count returns `{ unread }`; spec R3 specifies `{ \"count\": n }`.",
+      "location": "plan.md step 5; spec.md R3",
+      "expected_lenses": [
+        "lens-consistency"
+      ],
+      "severity": "minor"
+    }
+  ],
+  "tensions": [
+    {
+      "id": "T1",
+      "lenses": [
+        "lens-architecture",
+        "lens-spec-coverage"
+      ],
+      "related_defects": [
+        "D1",
+        "D2"
+      ],
+      "description": "Architecture's natural fix is to delete inboxCursor.ts and call the shared parseLimit/decodeCursor/toPage as activity.ts does. Spec-coverage's natural fix is to cap the inbox limit at 50 for AC2. But parseLimit has no per-call maximum: it clamps to config.paging.maxLimit, which defaults to 100 in src/config.ts (two files from the route) and is shared with the activity feed. Plain reuse silently brings back the 100 cap, and the obvious way to get 50 (set PAGE_MAX_LIMIT / config.paging.maxLimit to 50) also changes the activity feed.",
+      "lens_a_fix": "Replace inboxCursor.ts and the OFFSET query with the shared keyset helpers from src/lib/pagination.ts, as in activity.ts.",
+      "lens_b_fix": "Cap limit at 50 for the inbox so limit=200 returns at most 50 items.",
+      "reconciliation": "Reuse the shared keyset helpers, but give parseLimit an optional max argument that defaults to config.paging.maxLimit, so activity and other callers keep 100, and pass 50 from the notifications route. Leave the global config alone. Add tests for AC2 on the inbox and for the unchanged activity cap. This needs architecture's fact (the clamp comes from shared config.paging.maxLimit = 100 in config.ts) and spec-coverage's fact (R1/AC2 clamp at 50).",
+      "subtle": true
+    },
+    {
+      "id": "T2",
+      "lenses": [
+        "lens-risk",
+        "lens-tests"
+      ],
+      "related_defects": [
+        "D5",
+        "D6"
+      ],
+      "description": "Risk's natural fix for the timeout-prone bulk UPDATE is to hand read-all to the existing job queue (src/jobs/queue.ts enqueue, the pattern activity.ts uses for its purge) and respond right away. Tests' natural fix is an endpoint test that calls read-all and then asserts unread-count is 0 (AC5). Once read-all is asynchronous, unread-count stays non-zero until the worker runs, so that assertion, and AC5 itself, no longer hold. Risk's evidence is in config.ts/pool.ts and the spec's heavy-user numbers; tests' evidence is AC5 and the plan's test list.",
+      "lens_a_fix": "Move read-all to a background job via enqueue() and return immediately, so no request runs a long UPDATE.",
+      "lens_b_fix": "Add a test that calls POST /read-all then GET /unread-count and expects { count: 0 }.",
+      "reconciliation": "Keep read-all synchronous but bounded: loop `UPDATE notifications SET read_at = now() WHERE id IN (SELECT id FROM notifications WHERE user_id = $1 AND read_at IS NULL LIMIT 1000)` until a batch updates fewer than 1000 rows, so each statement stays well under the per-statement 2000 ms timeout (using the step 1 partial index), and return 204 only after the last batch. The AC5 test then holds, plus a unit test of the batch loop with mocked row counts. This needs risk's fact (the timeout is per statement and set in config/pool) and tests' fact (AC5 requires the count to be 0 as soon as read-all returns, which rules out the queue).",
+      "subtle": false
+    },
+    {
+      "id": "T3",
+      "lenses": [
+        "lens-architecture",
+        "lens-risk"
+      ],
+      "related_defects": [
+        "D4",
+        "D3"
+      ],
+      "description": "Architecture's natural fix is to follow activity.ts: run the repo through userQuery and drop the hand-written user_id predicates, so row-level security does the scoping. Risk's natural fix is to add `AND user_id = $2` to markRead. Taken together, the codebase convention says the predicate is redundant and should go. But the migrations folder defines an RLS policy only for activity (1712000000000_create_activity.sql). notifications is created and owned by the producing services, has no policy, and adding one is out of scope, so under userQuery alone every notifications statement (markRead, list, unread-count, read-all) is unscoped.",
+      "lens_a_fix": "Route all NotificationsRepo statements through userQuery and rely on RLS for scoping, as activity.ts does, removing the explicit user_id filters.",
+      "lens_b_fix": "Add a user_id predicate to markRead so other users' notifications match no row and return 404.",
+      "reconciliation": "Use userQuery for consistency if desired, but keep explicit `user_id = $n` predicates on every notifications statement, including `UPDATE notifications SET read_at = COALESCE(read_at, now()) WHERE id = $1 AND user_id = $2` (rowCount 0 then means not found or not owned, 404), and record that notifications has no RLS policy. Add a DB-level AC4 test. This needs risk's fact (markRead lacks ownership) and the fixture fact that RLS covers only activity, which sits in migrations/, not in pool.ts.",
+      "subtle": true
+    }
+  ]
+}

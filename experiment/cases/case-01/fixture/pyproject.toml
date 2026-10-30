@@ -1,0 +1,16 @@
+[project]
+name = "orders-service"
+version = "2.14.0"
+requires-python = ">=3.11"
+dependencies = [
+    "flask>=3.0",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "tests"]
+addopts = "-q"

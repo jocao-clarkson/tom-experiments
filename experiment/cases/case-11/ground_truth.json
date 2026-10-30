@@ -1,0 +1,88 @@
+{
+  "case_id": "case-11",
+  "type": "tension",
+  "domain": "api",
+  "defects": [
+    {
+      "id": "D1",
+      "description": "Plan creates a bespoke PayCoreClient wrapping httpx.AsyncClient directly instead of reusing the shared app/clients/http.py HttpClient that all third-party calls use (as fraud_client does in main.py), losing its timeout default, log_event logging and UpstreamError mapping.",
+      "location": "plan.md step 2, step 8; fixture/app/clients/http.py; fixture/app/main.py",
+      "expected_lenses": ["lens-architecture"],
+      "severity": "major"
+    },
+    {
+      "id": "D2",
+      "description": "Plan retries the PayCore refund POST once after a timeout. Spec R3/AC3 require exactly one outbound call because PayCore refunds have no idempotency key; a timeout must go straight to pending_review/202. The retry can create a duplicate refund.",
+      "location": "plan.md step 5; spec.md R3, AC3",
+      "expected_lenses": ["lens-consistency", "lens-risk"],
+      "severity": "blocker"
+    },
+    {
+      "id": "D3",
+      "description": "PayCore client is created with timeout=None, so the outbound call has no timeout. Violates the NFR that outbound calls must have a timeout (and the 1.5 s p95), and makes the R3 timeout/pending_review path unreachable.",
+      "location": "plan.md step 2; spec.md non-functional constraints",
+      "expected_lenses": ["lens-risk"],
+      "severity": "major"
+    },
+    {
+      "id": "D4",
+      "description": "RefundDeclinedError carries a fixed message and no error.details.reason, so R5/AC4 (a human-readable decline reason for the agent, e.g. 'card expired') is not implemented.",
+      "location": "plan.md step 3; spec.md R5, AC4",
+      "expected_lenses": ["lens-spec-coverage"],
+      "severity": "major"
+    },
+    {
+      "id": "D5",
+      "description": "Plan logs the full PayCore response body (resp.text) through a plain logging.getLogger call, bypassing app/logging.py log_event redaction. Per docs/paycore.md the 402 decline body contains card_last4, card_fingerprint, billing_address and a free-text message with card digits and address, which the NFR forbids in logs.",
+      "location": "plan.md step 6; fixture/app/logging.py; fixture/docs/paycore.md; spec.md non-functional constraints",
+      "expected_lenses": ["lens-risk", "lens-architecture"],
+      "severity": "major"
+    },
+    {
+      "id": "D6",
+      "description": "The refund row is only inserted after PayCore answers, and nothing reserves the balance between the R2 check and the insert. Two concurrent refund requests for the same order can both pass the refunded_total check and both call PayCore (over-refund beyond the captured amount), and if the insert fails after PayCore succeeds the refund is unrecorded (violates R4).",
+      "location": "plan.md step 5 (final paragraph); fixture/app/repositories/orders_repo.py",
+      "expected_lenses": ["lens-risk"],
+      "severity": "major"
+    },
+    {
+      "id": "D7",
+      "description": "Plan records declines with status 'declined' and claims refunds.status is free text that can hold PayCore's vocabulary. Spec R4 allows only succeeded/failed/pending_review, migrations/003_create_refunds.sql enforces that with a CHECK constraint (the insert would fail), and refunded_total only excludes 'failed', so a 'declined' row would also wrongly consume refundable balance. Declines must be recorded as 'failed'.",
+      "location": "plan.md steps 4, 5; spec.md R4; fixture/migrations/003_create_refunds.sql; fixture/app/repositories/orders_repo.py",
+      "expected_lenses": ["lens-consistency"],
+      "severity": "major"
+    }
+  ],
+  "tensions": [
+    {
+      "id": "T1",
+      "lenses": ["lens-architecture", "lens-consistency"],
+      "related_defects": ["D1", "D2"],
+      "description": "Architecture's fix is to drop the bespoke client and build the PayCore client from the shared HttpClient like fraud_client. Consistency's fix is to remove the plan's retry so the refund POST is sent exactly once (R3). In http.py the retry loop only applies to methods in retry_methods, which looks safe, but the default set comes from settings.http_retry_methods = 'GET,HEAD,POST' with http_max_retries = 3 (app/settings.py). A plain reuse therefore retries the refund POST up to three times on timeout or 502/503/504, reintroducing a worse version of the duplicate-refund bug. Neither http.py nor the spec shows this; it needs the settings default plus R3.",
+      "lens_a_fix": "Replace PayCoreClient with an HttpClient instance constructed in main.py like fraud_client.",
+      "lens_b_fix": "Delete the retry-after-500ms; issue the PayCore call once and go straight to pending_review/202 on timeout.",
+      "reconciliation": "Reuse HttpClient but construct the PayCore instance with retry_methods=() (or max_retries=0) and a finite timeout, because the settings default includes POST (architecture/fixture fact) and R3 forbids a second call (consistency/spec fact). Do not change the shared HTTP_RETRY_METHODS default, which other clients rely on. The service maps the UpstreamError raised on timeout to a pending_review row and 202.",
+      "subtle": true
+    },
+    {
+      "id": "T2",
+      "lenses": ["lens-risk", "lens-consistency"],
+      "related_defects": ["D6", "D7"],
+      "description": "Risk's natural fix for the check-then-call race and the lost-record window is to insert a reservation row (e.g. status 'pending' or 'processing') before calling PayCore and update it afterwards. Consistency's fix is to restrict statuses to R4's set, which the migration's CHECK constraint enforces. A new in-flight status violates both R4 and the CHECK (the insert fails). The risk evidence is the plan's insert-after-call ordering and orders_repo; the status constraint lives in spec R4 and migrations/.",
+      "lens_a_fix": "Insert a 'pending'/'processing' refund row before the PayCore call to reserve the balance, then update it to the final status.",
+      "lens_b_fix": "Use only succeeded/failed/pending_review (record declines as 'failed'), matching R4 and the migration CHECK constraint.",
+      "reconciliation": "Insert the reservation row as 'pending_review' before calling PayCore: it is allowed by R4 and the CHECK (consistency fact), refunded_total already counts it so concurrent requests see the reserved balance, and if the process dies mid-call the row correctly sits in finance's manual pending_review queue (risk fact). Then update it to 'succeeded' (with provider_ref) or 'failed' (declines) via a new OrdersRepository.update_refund_status method; a timeout leaves it pending_review. No new status, no schema change.",
+      "subtle": true
+    },
+    {
+      "id": "T3",
+      "lenses": ["lens-spec-coverage", "lens-risk"],
+      "related_defects": ["D4", "D5"],
+      "description": "Spec-coverage wants R5's human-readable reason, and the obvious way is to pass PayCore's decline 'message' into error.details.reason. Risk, reading docs/paycore.md, sees that this message embeds the card's last digits and billing address, so echoing it violates the cardholder-data NFR; its fix is to keep provider payloads out of responses and logs entirely, which leaves R5 unmet. The spec only states the generic NFR; the PII-in-message fact is in the fixture docs.",
+      "lens_a_fix": "Return PayCore's decline message as error.details.reason in the 502 response.",
+      "lens_b_fix": "Never surface or log PayCore's payload; return a generic decline error and log only via log_event.",
+      "reconciliation": "Map PayCore's decline_code (expired_card, charge_disputed, etc. from docs/paycore.md) to a fixed allow-list of agent-facing reason strings matching R5's examples, with a generic fallback, never echoing 'message'. Log only decline_code and the refund id via log_event; do not log the raw body, since key-based redaction does not scrub the free-text message.",
+      "subtle": false
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+import os
+
+HTTP_RETRY_TOTAL = int(os.environ.get("HTTP_RETRY_TOTAL", "3"))
+HTTP_RETRY_BACKOFF = float(os.environ.get("HTTP_RETRY_BACKOFF", "0.5"))
+HTTP_RETRY_STATUSES = (502, 503, 504)
+HTTP_RETRY_METHODS = None
+HTTP_POOL_SIZE = 10

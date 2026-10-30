@@ -1,0 +1,95 @@
+{
+  "case_id": "case-08",
+  "type": "tension",
+  "domain": "auth",
+  "defects": [
+    {
+      "id": "D1",
+      "description": "Key hashing is implemented ad hoc as _key_hash (HMAC-SHA256) in the route module authsvc/routes/api_keys.py, and principal.py imports _key_hash from that route module. This bypasses authsvc/crypto.py, whose docstring makes hash_secret/verify_secret the one place stored secrets are hashed (recovery.py follows it), and makes the auth layer depend on a routes module.",
+      "location": "plan.md steps 2 and 7; fixture/authsvc/crypto.py; fixture/authsvc/routes/recovery.py",
+      "expected_lenses": ["lens-architecture"],
+      "severity": "major"
+    },
+    {
+      "id": "D2",
+      "description": "The key hash is an HMAC keyed with settings.jwt_secret, reusing the JWT signing key for a second purpose: rotating JWT_SECRET silently invalidates every stored API key hash, and a JWT key leak also enables offline checking of key hashes. settings.py already has a dedicated secret_pepper that the plan does not use.",
+      "location": "plan.md step 2; fixture/authsvc/settings.py (jwt_secret, secret_pepper)",
+      "expected_lenses": ["lens-risk"],
+      "severity": "major"
+    },
+    {
+      "id": "D3",
+      "description": "The key lookup memo uses settings.cache_ttl_seconds, whose default (CACHE_TTL_SECONDS) is 300 s, and revocation only evicts on the instance that served the DELETE. A revoked key keeps authenticating on the other instances for up to 5 minutes, violating R4/AC3 (401 within 60 s on every instance).",
+      "location": "plan.md steps 6 and 8; fixture/authsvc/settings.py cache_ttl_seconds default; spec.md R4, AC3",
+      "expected_lenses": ["lens-consistency"],
+      "severity": "blocker"
+    },
+    {
+      "id": "D4",
+      "description": "RequestLogMiddleware (authsvc/reqlog.py) logs the Authorization header at DEBUG through redact.mask_bearer, which only replaces the part after the last '.' (the JWT signature) and returns dotless values unchanged. sk_live_ keys contain no '.', so the full secret is logged at DEBUG, and the rollout runs a canary at LOG_LEVEL=DEBUG. The plan never updates the redaction, violating AC4 and the never-log-secrets constraint.",
+      "location": "plan.md rollout notes; fixture/authsvc/redact.py mask_bearer; fixture/authsvc/reqlog.py",
+      "expected_lenses": ["lens-risk"],
+      "severity": "blocker"
+    },
+    {
+      "id": "D5",
+      "description": "Audit rows are written by a new _write_audit helper that INSERTs into audit_events directly from the route module, duplicating authsvc/audit.py AuditLog, which is the codebase's one audit writer (recovery.py uses it) and scrubs metadata before storing it.",
+      "location": "plan.md steps 4 and 6; fixture/authsvc/audit.py; fixture/authsvc/routes/recovery.py",
+      "expected_lenses": ["lens-architecture"],
+      "severity": "major"
+    },
+    {
+      "id": "D6",
+      "description": "The api_key.revoked event's metadata is only {\"api_key\": {\"id\": key_id}}; R6 requires both events' metadata to include the key id, name and scopes, so the revoke event is missing name and scopes.",
+      "location": "plan.md step 6; spec.md R6",
+      "expected_lenses": ["lens-spec-coverage", "lens-consistency"],
+      "severity": "major"
+    },
+    {
+      "id": "D7",
+      "description": "The test strategy has no test for AC3 (revoked key rejected within 61 s on every instance; the revoke test only checks the same process), AC5 (1,000 requests in a minute cause at most one last_used_at write), or AC4 (no secret in the database, audit table or logs). The audit test checks action/actor/target but not metadata contents.",
+      "location": "plan.md test strategy; spec.md AC3, AC4, AC5",
+      "expected_lenses": ["lens-tests"],
+      "severity": "major"
+    },
+    {
+      "id": "D8",
+      "description": "The last_used_at UPDATE condition `last_used_at < now() - interval '1 minute'` is NULL (not true) for a never-used key, because last_used_at is nullable with no default (step 1). The first write never happens, so last_used_at stays NULL forever and R5 is never met. Needs `last_used_at IS NULL OR ...`.",
+      "location": "plan.md steps 1 and 9; spec.md R5",
+      "expected_lenses": ["lens-consistency", "lens-risk"],
+      "severity": "major"
+    }
+  ],
+  "tensions": [
+    {
+      "id": "T1",
+      "lenses": ["lens-architecture", "lens-risk"],
+      "related_defects": ["D1", "D2"],
+      "description": "Architecture's natural fix is to hash and verify API keys with crypto.hash_secret/verify_secret, which crypto.py's docstring says every stored secret uses. Those are salted PBKDF2 whose iteration count comes from settings.hash_params(), default HASH_ITERATIONS=600000: hundreds of milliseconds per verify, and salted so it must run on every request (a memo hit still needs a verify of the presented token). At about 333 rps per instance that blows the spec's 5 ms p95 budget and makes random sk_live_ tokens a cheap CPU DoS. Risk's natural fix keeps a fast HMAC but keys it with secret_pepper, which leaves hashing in the route module and principal.py importing from routes. The convention is visible only in crypto.py; the cost only in the settings.py default plus the spec NFR; the pepper only in settings.py.",
+      "lens_a_fix": "Delete the inline _key_hash and hash/verify API keys with crypto.hash_secret / verify_secret like every other stored secret.",
+      "lens_b_fix": "Keep a fast HMAC-SHA256 for the high-entropy keys but key it with settings.secret_pepper instead of jwt_secret, compared with hmac.compare_digest.",
+      "reconciliation": "Add a dedicated fast keyed helper to crypto.py (e.g. hash_api_key / verify_api_key: HMAC-SHA256 keyed with settings.secret_pepper, hmac.compare_digest), next to the PBKDF2 functions, with the reason that 190-bit random keys don't need a slow KDF and the 600k-iteration default can't meet the 5 ms per-request budget. Both routes/api_keys.py and principal.py import it from crypto.py (no principal->routes import). PBKDF2 stays for passwords and recovery codes. Needs architecture's fact (crypto.py is the single hashing home) and risk's facts (secret_pepper exists; HASH_ITERATIONS default vs the 5 ms NFR).",
+      "subtle": true
+    },
+    {
+      "id": "T2",
+      "lenses": ["lens-spec-coverage", "lens-architecture"],
+      "related_defects": ["D6", "D5"],
+      "description": "Spec-coverage's natural fix for R6 is to give the revoke event the same metadata as the create event, {\"api_key\": {\"id\", \"name\", \"scopes\"}}. Architecture's natural fix is to replace the direct INSERT helper with AuditLog(conn).record(..., metadata=...). Combined as written, both events lose all their metadata: AuditLog.record runs redact.scrub, and redact.is_sensitive drops any field ending in \"_key\", so the nested \"api_key\" object is removed and both rows persist {} - R6 fails for create as well as revoke. The plan as written (direct INSERT) actually stores the create metadata intact. The suffix rule lives only in redact.py, a shared helper AuditLog depends on; R6's content requirement is only in the spec.",
+      "lens_a_fix": "Make the api_key.revoked metadata match api_key.created: {\"api_key\": {\"id\": key_id, \"name\": name, \"scopes\": scopes}}.",
+      "lens_b_fix": "Drop _write_audit and record both events through the existing AuditLog(conn).record, as recovery.py does.",
+      "reconciliation": "Use AuditLog.record for both events, but with flat metadata whose field names don't match redact's sensitive suffixes, e.g. {\"key_id\": ..., \"key_name\": ..., \"scopes\": [...]} (not \"api_key\" or anything ending in _key/secret/token), and extend the audit test to assert the persisted metadata of both rows contains id, name and scopes. Needs coverage's fact (R6 requires id, name, scopes on both events) and architecture's fact (AuditLog scrubs via redact, whose suffix rule removes \"api_key\").",
+      "subtle": true
+    },
+    {
+      "id": "T3",
+      "lenses": ["lens-risk", "lens-tests"],
+      "related_defects": ["D4", "D7"],
+      "description": "Risk's natural fix is to make redact.mask_bearer handle sk_live_ tokens (mask everything after the 8-character prefix) and treat the DEBUG canary as safe once that is done. Tests' natural fix for AC4 is a TestClient test that creates a key, makes an authenticated request, and asserts the secret is absent from caplog.text. Combined, the regression guard can't fail: create_app pins the \"authsvc\" logger to settings.log_level (default INFO), and caplog's default/root-level capture doesn't override that, so the DEBUG authorization line from reqlog.py is never emitted in the test. The test passes against the unfixed mask_bearer, so the canary at LOG_LEVEL=DEBUG ships on an untested redaction. The leak (dotless passthrough) is visible in redact.py/reqlog.py; the level pinning only in app.py plus the settings default.",
+      "lens_a_fix": "Change redact.mask_bearer so non-JWT bearer values (sk_live_...) are masked after the prefix, e.g. sk_live_ABCDEFGH<redacted>, before running the DEBUG canary.",
+      "lens_b_fix": "Add an AC4 test: create a key, authenticate with it via TestClient, and assert the secret does not appear in caplog.text (plus not in the stored row or audit metadata).",
+      "reconciliation": "Fix mask_bearer for sk_live_ values, and make the AC4 log test actually exercise the DEBUG path: after create_app, set the level on the authsvc.http logger explicitly (caplog.set_level(logging.DEBUG, logger=\"authsvc.http\") or LOG_LEVEL=DEBUG with get_settings cache cleared), assert the authorization line was captured, then assert the secret is absent; add a unit test of mask_bearer on an sk_live_ value. Keep the DEBUG canary gated on that test. Needs risk's fact (dotless tokens pass through mask_bearer at DEBUG) and tests' fact (create_app pins the authsvc logger to INFO by default).",
+      "subtle": true
+    }
+  ]
+}

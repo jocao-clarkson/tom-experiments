@@ -1,0 +1,23 @@
+{
+  "name": "identity-service",
+  "version": "3.4.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p .",
+    "start": "node dist/server.js",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "express": "^4.19.2",
+    "pg": "^8.11.5"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/express": "^4.17.21",
+    "@types/pg": "^8.11.5",
+    "typescript": "^5.4.5",
+    "vitest": "^1.6.0"
+  }
+}
